@@ -1,0 +1,259 @@
+Reason: the SDK's GX and the game's vertex and fog writers append to Starlet's GX FIFO instead of
+the write-gather pipe at 0xCC008000; the paired-single matrix writers become C; GXInit maps no
+hardware registers.
+
+diff --git a/libs/dolphin/include/dolphin/gx/GXVert.h b/libs/dolphin/include/dolphin/gx/GXVert.h
+index 3221c4b..dd8f85b 100644
+--- a/libs/dolphin/include/dolphin/gx/GXVert.h
++++ b/libs/dolphin/include/dolphin/gx/GXVert.h
+@@ -22,10 +22,26 @@ typedef union {
+ 	f64 f64;
+ } PPCWGPipe;
+ 
+-#ifdef __MWERKS__
++#ifdef TARGET_PC
++/* The write-gather pipe appends big-endian command bytes to Starlet's GX FIFO. */
++#include <starlet/compat/gx_fifo.h>
++#undef GXWGFifo
++/* The SDK's matrix writers take the pipe's address as a destination they ignore. */
++#define GXWGFifo (*(volatile PPCWGPipe*)0)
++#define GX_VERT_WRITE_u8(x)  starlet_gx_u8((uint8_t)(x))
++#define GX_VERT_WRITE_s8(x)  starlet_gx_u8((uint8_t)(int8_t)(x))
++#define GX_VERT_WRITE_u16(x) starlet_gx_u16((uint16_t)(x))
++#define GX_VERT_WRITE_s16(x) starlet_gx_u16((uint16_t)(int16_t)(x))
++#define GX_VERT_WRITE_u32(x) starlet_gx_u32((uint32_t)(x))
++#define GX_VERT_WRITE_s32(x) starlet_gx_u32((uint32_t)(int32_t)(x))
++#define GX_VERT_WRITE_f32(x) starlet_gx_f32((float)(x))
++#define GX_VERT_WRITE(T, x)  GX_VERT_WRITE_##T(x)
++#elif defined(__MWERKS__)
+ volatile PPCWGPipe GXWGFifo : GXFIFO_ADDR;
++#define GX_VERT_WRITE(T, x) GXWGFifo.T = x
+ #else
+ #define GXWGFifo (*(volatile PPCWGPipe*)GXFIFO_ADDR)
++#define GX_VERT_WRITE(T, x) GXWGFifo.T = x
+ #endif
+ 
+ #if DEBUG
+@@ -44,37 +60,37 @@ volatile PPCWGPipe GXWGFifo : GXFIFO_ADDR;
+ // inline functions
+ 
+ #define FUNC_1PARAM(name, T)                                                   \
+-	static inline void name##1##T(T x) { GXWGFifo.T = x; }
++	static inline void name##1##T(T x) { GX_VERT_WRITE(T, x); }
+ 
+ #define FUNC_2PARAM(name, T)                                                   \
+ 	static inline void name##2##T(T x, T y)                                    \
+ 	{                                                                          \
+-		GXWGFifo.T = x;                                                        \
+-		GXWGFifo.T = y;                                                        \
++		GX_VERT_WRITE(T, x);                                                        \
++		GX_VERT_WRITE(T, y);                                                        \
+ 	}
+ 
+ #define FUNC_3PARAM(name, T)                                                   \
+ 	static inline void name##3##T(T x, T y, T z)                               \
+ 	{                                                                          \
+-		GXWGFifo.T = x;                                                        \
+-		GXWGFifo.T = y;                                                        \
+-		GXWGFifo.T = z;                                                        \
++		GX_VERT_WRITE(T, x);                                                        \
++		GX_VERT_WRITE(T, y);                                                        \
++		GX_VERT_WRITE(T, z);                                                        \
+ 	}
+ 
+ #define FUNC_4PARAM(name, T)                                                   \
+ 	static inline void name##4##T(T x, T y, T z, T w)                          \
+ 	{                                                                          \
+-		GXWGFifo.T = x;                                                        \
+-		GXWGFifo.T = y;                                                        \
+-		GXWGFifo.T = z;                                                        \
+-		GXWGFifo.T = w;                                                        \
++		GX_VERT_WRITE(T, x);                                                        \
++		GX_VERT_WRITE(T, y);                                                        \
++		GX_VERT_WRITE(T, z);                                                        \
++		GX_VERT_WRITE(T, w);                                                        \
+ 	}
+ 
+ #define FUNC_INDEX8(name)                                                      \
+-	static inline void name##1x8(u8 x) { GXWGFifo.u8 = x; }
++	static inline void name##1x8(u8 x) { GX_VERT_WRITE(u8, x); }
+ 
+ #define FUNC_INDEX16(name)                                                     \
+-	static inline void name##1x16(u16 x) { GXWGFifo.u16 = x; }
++	static inline void name##1x16(u16 x) { GX_VERT_WRITE(u16, x); }
+ 
+ #endif
+ 
+diff --git a/libs/dolphin/src/gx/GXInit.c b/libs/dolphin/src/gx/GXInit.c
+index 6945b5b..3162b82 100644
+--- a/libs/dolphin/src/gx/GXInit.c
++++ b/libs/dolphin/src/gx/GXInit.c
+@@ -24,6 +24,9 @@ u32* __piReg;
+ 
+ static void EnableWriteGatherPipe(void)
+ {
++#ifdef TARGET_PC
++	return;
++#endif
+ 	u32 hid2 = PPCMfhid2();
+ 
+ 	PPCMtwpar(OSUncachedToPhysical((void*)GXFIFO_ADDR));
+@@ -33,6 +36,9 @@ static void EnableWriteGatherPipe(void)
+ 
+ static void DisableWriteGatherPipe(void)
+ {
++#ifdef TARGET_PC
++	return;
++#endif
+ 	u32 hid2 = PPCMfhid2();
+ 
+ 	hid2 &= ~0x40000000;
+@@ -74,10 +80,21 @@ GXFifoObj* GXInit(void* base, u32 size)
+ 	gx->tcsManEnab = FALSE;
+ 	gx->pad0       = 0;
+ 	GXSetMisc(GX_MT_XF_FLUSH, 0);
++#ifdef TARGET_PC
++	/* Register writes land in plain memory; the command stream carries the state. */
++	{
++		static u32 piRegs[0x40], cpRegs[0x40], peRegs[0x40], memRegs[0x40];
++		__piReg  = piRegs;
++		__cpReg  = (u16*)cpRegs;
++		__peReg  = (u16*)peRegs;
++		__memReg = (u16*)memRegs;
++	}
++#else
+ 	__piReg  = OSPhysicalToUncached(0xC003000);
+ 	__cpReg  = OSPhysicalToUncached(0xC000000);
+ 	__peReg  = OSPhysicalToUncached(0xC001000);
+ 	__memReg = OSPhysicalToUncached(0xC004000);
++#endif
+ 	__GXFifoInit();
+ 	GXInitFifoBase(&FifoObj, base, size);
+ 	GXSetCPUFifo(&FifoObj);
+diff --git a/libs/dolphin/src/gx/GXTransform.c b/libs/dolphin/src/gx/GXTransform.c
+index 4321706..7700c27 100644
+--- a/libs/dolphin/src/gx/GXTransform.c
++++ b/libs/dolphin/src/gx/GXTransform.c
+@@ -84,7 +84,13 @@ void GXGetProjectionv(f32* ptr)
+ static asm void WriteMTXPS4x3(register f32 mtx[3][4],
+                               register volatile f32* dest)
+ {
+-#ifdef __MWERKS__ // clang-format off
++#ifdef TARGET_PC
++	int r, c;
++	(void)dest;
++	for (r = 0; r < 3; r++)
++		for (c = 0; c < 4; c++)
++			GX_WRITE_F32(mtx[r][c]);
++#elif defined(__MWERKS__) // clang-format off
+ 	psq_l f0, 0x00(mtx), 0, qr0
+ 	psq_l f1, 0x08(mtx), 0, qr0
+ 	psq_l f2, 0x10(mtx), 0, qr0
+@@ -103,7 +109,13 @@ static asm void WriteMTXPS4x3(register f32 mtx[3][4],
+ static asm void WriteMTXPS3x3from3x4(register f32 mtx[3][4],
+                                      register volatile f32* dest)
+ {
+-#ifdef __MWERKS__ // clang-format off
++#ifdef TARGET_PC
++	int r, c;
++	(void)dest;
++	for (r = 0; r < 3; r++)
++		for (c = 0; c < 3; c++)
++			GX_WRITE_F32(mtx[r][c]);
++#elif defined(__MWERKS__) // clang-format off
+ 	psq_l f0, 0x00(mtx), 0, qr0
+ 	lfs   f1, 0x08(mtx)
+ 	psq_l f2, 0x10(mtx), 0, qr0
+@@ -121,7 +133,13 @@ static asm void WriteMTXPS3x3from3x4(register f32 mtx[3][4],
+ 
+ static asm void WriteMTXPS4x2(register f32 mtx[2][4],
+                               register volatile f32* dest) {
+-#ifdef __MWERKS__ // clang-format off
++#ifdef TARGET_PC
++	int r, c;
++	(void)dest;
++	for (r = 0; r < 2; r++)
++		for (c = 0; c < 4; c++)
++			GX_WRITE_F32(mtx[r][c]);
++#elif defined(__MWERKS__) // clang-format off
+ 	psq_l f0, 0x00(mtx), 0, qr0
+ 	psq_l f1, 0x08(mtx), 0, qr0
+ 	psq_l f2, 0x10(mtx), 0, qr0
+diff --git a/libs/dolphin/src/gx/__gx.h b/libs/dolphin/src/gx/__gx.h
+index 428d263..f039a1b 100644
+--- a/libs/dolphin/src/gx/__gx.h
++++ b/libs/dolphin/src/gx/__gx.h
+@@ -1,10 +1,17 @@
+ #include "dolphin/gx/GXStruct.h"
+ #include "dolphin/gx/GXVerify.h"
+ 
++#ifdef TARGET_PC
++/* GX_WRITE_* from starlet/compat/gx_fifo.h (through GXVert.h). Addresses the GX reads are
++ * the 32-bit physical addresses of game memory. */
++#undef GX_WRITE_U32
++#define GX_WRITE_U32(ui) starlet_gx_u32((uint32_t)(uintptr_t)(ui))
++#else
+ #define GX_WRITE_U8(ub)  GXWGFifo.u8 = (u8)(ub)
+ #define GX_WRITE_U16(us) GXWGFifo.u16 = (u16)(us)
+ #define GX_WRITE_U32(ui) GXWGFifo.u32 = (u32)(ui)
+ #define GX_WRITE_F32(f)  GXWGFifo.f32 = (f32)(f);
++#endif
+ 
+ // Write to GX Transform Unit (XF) register
+ // TODO: Pikmin2 has nicer macros here, refactor
+diff --git a/src/MarioUtil/PacketUtil.cpp b/src/MarioUtil/PacketUtil.cpp
+index 0cf575a..c295cdf 100644
+--- a/src/MarioUtil/PacketUtil.cpp
++++ b/src/MarioUtil/PacketUtil.cpp
+@@ -138,14 +138,14 @@ static void FifoSetFogRangeAdj(u8 enable, u16 center, GXFogAdjTable* table)
+ 		for (int i = 0; i < 10; i += 2) {
+ 			u32 range_adj = ((i / 2) + 0xE9) << 24 | table->r[i + 1] << 12
+ 			                | table->r[i];
+-			GXWGFifo.u8  = 0x61;
+-			GXWGFifo.u32 = range_adj;
++			GXParam1u8(0x61);
++			GXParam1u32(range_adj);
+ 		}
+ 	}
+ 
+ 	u32 range_c  = (center + 342) | 0xE8000000 | enable << 10;
+-	GXWGFifo.u8  = 0x61;
+-	GXWGFifo.u32 = range_c;
++	GXParam1u8(0x61);
++	GXParam1u32(range_c);
+ }
+ 
+ // Closure batch 128: exact. `c_hex` has to be a named local (it is retail's
+@@ -196,22 +196,22 @@ static void FifoSetFog(GXFogType type, f32 startz, f32 endz, f32 nearz,
+ 	c_hex = *(u32*)&C;
+ 
+ 	fog0         = (*(u32*)&a >> 12) | 0xEE000000;
+-	GXWGFifo.u8  = 0x61;
+-	GXWGFifo.u32 = fog0;
++	GXParam1u8(0x61);
++	GXParam1u32(fog0);
+ 
+-	GXWGFifo.u8  = 0x61;
+-	GXWGFifo.u32 = port_cvt_fp2unsigned(8.388638e6f * B_mant) | 0xEF000000;
++	GXParam1u8(0x61);
++	GXParam1u32(port_cvt_fp2unsigned(8.388638e6f * B_mant) | 0xEF000000);
+ 
+-	GXWGFifo.u8  = 0x61;
+-	GXWGFifo.u32 = B_expn | 0xF0000000;
++	GXParam1u8(0x61);
++	GXParam1u32(B_expn | 0xF0000000);
+ 
+ 	fog3         = (c_hex >> 12) | (type << 21) | 0xF1000000;
+-	GXWGFifo.u8  = 0x61;
+-	GXWGFifo.u32 = fog3;
++	GXParam1u8(0x61);
++	GXParam1u32(fog3);
+ 
+ 	fogclr       = color.b | (color.g << 8) | (color.r << 16) | 0xF2000000;
+-	GXWGFifo.u8  = 0x61;
+-	GXWGFifo.u32 = fogclr;
++	GXParam1u8(0x61);
++	GXParam1u32(fogclr);
+ }
+ 
+ static void SetFogBase(const J3DFogInfo* fog)

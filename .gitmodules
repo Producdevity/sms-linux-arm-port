@@ -1,0 +1,9 @@
+[submodule "third_party/sms"]
+	path = third_party/sms
+	url = https://github.com/chasem-dev/sms-english.git
+[submodule "third_party/sms-pc-port"]
+	path = third_party/sms-pc-port
+	url = https://github.com/chasem-dev/sms-pc-port.git
+[submodule "third_party/starlet"]
+	path = third_party/starlet
+	url = https://github.com/Producdevity/starlet.git

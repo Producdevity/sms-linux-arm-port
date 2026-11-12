@@ -1,0 +1,13 @@
+option(SMS_GLES "Build the OpenGL ES 3.1 renderer" OFF)
+set(SMS_STARLET_DIR "${CMAKE_SOURCE_DIR}/third_party/starlet" CACHE PATH "Starlet source tree")
+if(NOT EXISTS "${SMS_STARLET_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR "Starlet not found at ${SMS_STARLET_DIR}; set SMS_STARLET_DIR")
+endif()
+set(STARLET_GLES ${SMS_GLES})
+set(STARLET_TESTS ${BUILD_TESTING})
+# starlet::host uses the same SDL2 as the application.
+if(SMS_SDL_INCLUDE_DIR AND SMS_SDL_LIBRARY)
+    set(STARLET_SDL2_INCLUDE_DIR "${SMS_SDL_INCLUDE_DIR}" CACHE PATH "")
+    set(STARLET_SDL2_LIBRARY "${SMS_SDL_LIBRARY}" CACHE FILEPATH "")
+endif()
+add_subdirectory("${SMS_STARLET_DIR}" "${CMAKE_BINARY_DIR}/starlet")
