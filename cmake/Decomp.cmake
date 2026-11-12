@@ -44,7 +44,7 @@ target_compile_definitions(sms_headers INTERFACE GEKKO TARGET_PC VERSION_GMSE01 
 target_compile_options(sms_headers INTERFACE "$<$<COMPILE_LANGUAGE:CXX>:-Wno-register>")
 
 add_library(sms_game STATIC ${SMS_DECOMP_CXX_SOURCES} ${SMS_DECOMP_C_SOURCES} ${sms_gx_sources}
-  "${CMAKE_SOURCE_DIR}/src/graphics/gx_misc.c")
+  "${CMAKE_SOURCE_DIR}/src/graphics/gx_misc.c" "${CMAKE_SOURCE_DIR}/src/compat/sdk_layout_game.cpp")
 set_source_files_properties("${CMAKE_SOURCE_DIR}/src/graphics/gx_misc.c" PROPERTIES
   INCLUDE_DIRECTORIES "${SMS_DECOMP}/libs/dolphin/src/gx")
 target_link_libraries(sms_game PUBLIC sms_headers)
@@ -64,11 +64,13 @@ list(FILTER sms_cxx_c_sources INCLUDE REGEX "\\.c$")
 set_source_files_properties(${sms_cxx_c_sources} PROPERTIES LANGUAGE CXX)
 set_source_files_properties(${SMS_DECOMP_PCH_SOURCES} PROPERTIES COMPILE_OPTIONS "-include;${SMS_DECOMP}/include/SMS.pch")
 
-# The game defines the global operator new and delete over JKRHeap. starlet::os dispatches them
-# (guest threads to the game's heap, host code to malloc), so the game's own definitions are renamed.
+# The game defines the global operator new and delete over JKRHeap. They are renamed, with every
+# reference in the game library, so game code allocates from its JKR heaps and everything else
+# (Starlet, the converters, the host libraries) from malloc.
 find_program(SMS_OBJCOPY NAMES llvm-objcopy PATHS /opt/homebrew/opt/llvm/bin REQUIRED)
 file(WRITE "${CMAKE_BINARY_DIR}/game_new_syms.txt"
   "_Znwm __sms_game_new\n_Znam __sms_game_new_array\n_ZdlPv __sms_game_delete\n_ZdaPv __sms_game_delete_array\n")
 add_custom_command(TARGET sms_game POST_BUILD
   COMMAND "${SMS_OBJCOPY}" "--redefine-syms=${CMAKE_BINARY_DIR}/game_new_syms.txt" "$<TARGET_FILE:sms_game>"
   COMMENT "Renaming the game's global operator new and delete" VERBATIM)
+

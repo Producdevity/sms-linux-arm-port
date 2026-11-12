@@ -1,0 +1,38 @@
+Reason: Starlet's OS fills the game's OSThread and OSMessageQueue objects. They take Starlet's layout:
+OSThread ends with the later SDK's error and specific fields, and the message counts stay 32-bit
+where long is 64-bit on the host. src/platform/sdk_layout.cpp checks every shared structure at start.
+
+diff --git a/libs/dolphin/include/dolphin/os/OSMessage.h b/libs/dolphin/include/dolphin/os/OSMessage.h
+index 02839ce..3e2ecbd 100644
+--- a/libs/dolphin/include/dolphin/os/OSMessage.h
++++ b/libs/dolphin/include/dolphin/os/OSMessage.h
+@@ -14,9 +14,10 @@ struct OSMessageQueue {
+ 	struct OSThreadQueue queueSend;
+ 	struct OSThreadQueue queueReceive;
+ 	void* msgArray;
+-	long msgCount;
+-	long firstIndex;
+-	long usedCount;
++	/* long is 64 bits on the host; the SDK's counts are 32 bits, as in Starlet's OS. */
++	s32 msgCount;
++	s32 firstIndex;
++	s32 usedCount;
+ };
+ 
+ #define OS_MESSAGE_NOBLOCK 0
+diff --git a/libs/dolphin/include/dolphin/os/OSThread.h b/libs/dolphin/include/dolphin/os/OSThread.h
+index 631c721..052a4a9 100644
+--- a/libs/dolphin/include/dolphin/os/OSThread.h
++++ b/libs/dolphin/include/dolphin/os/OSThread.h
+@@ -49,6 +49,11 @@ typedef struct OSThread {
+ 	/*0x2FC*/ struct OSThreadLink linkActive;
+ 	/*0x304*/ u8* stackBase;
+ 	/*0x308*/ u32* stackEnd;
++#ifdef TARGET_PC
++	/* Starlet's OS fills OSThread with the later SDK's layout, which ends with these. */
++	s32 error;
++	void* specific[2];
++#endif
+ } OSThread;
+ 
+ enum OS_THREAD_STATE {

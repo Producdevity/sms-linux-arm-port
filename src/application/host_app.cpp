@@ -2,8 +2,8 @@
 // the GPU thread, controller sampling on this thread, and the game's main() on
 // the guest CPU.
 #include "application/host_app.hpp"
-#include "game/game_heap.hpp"
 #include "platform/memory.hpp"
+#include "platform/sdk_layout.hpp"
 
 #include "starlet/ai/ai.hpp"
 #include "starlet/card/card.hpp"
@@ -480,6 +480,7 @@ int run_checked(int argc, char** argv, int (*guest_main)()) {
     const std::string saves = argument(argc, argv, 2, "saves");
     const std::string shadercache = argument(argc, argv, 3, "shadercache");
     // The arena goes first, before the GPU driver and SDL map anything low.
+    sms::platform::check_sdk_layout();
     sms::platform::initialize_memory();
     Display display;
     // The frontend's SIGTERM: card writes in progress finish, then the process exits within 1 s.
@@ -579,7 +580,6 @@ int run_checked(int argc, char** argv, int (*guest_main)()) {
     };
     starlet::gx_fifo::start_gpu(gpu);
 
-    sms::game::install_game_heap();
     starlet::dvd::initialize({{gamedata + "/sys", {gamedata + "/files"}}});
     adopt_old_card(saves);
     starlet::card::initialize_cards(saves);

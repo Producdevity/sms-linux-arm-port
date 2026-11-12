@@ -88,3 +88,5 @@ sms-pc-port/uninit-05-BossManta-spawn-heading-translation.patch
 sms-pc-port/uninit-06-MapEventSirena-hotel-rumble-position.patch
 sms-pc-port/zz-msl-01-printf-null-string.patch
 0001-gx-writes-go-through-starlet-s-fifo.patch
+0002-sdk-structures-take-starlet-s-layout.patch
+0003-gx-texture-objects-fit-32-bytes.patch

@@ -1,0 +1,53 @@
+Reason: the SDK's internal texture object keeps its user data in a 32-bit slot, so it fits the
+game's 32-byte GXTexObj with 8-byte pointers; a 40-byte object overwrote the field after every
+texture object the game embeds (JPATextureResource::registNum).
+
+diff --git a/libs/dolphin/src/gx/GXTexture.c b/libs/dolphin/src/gx/GXTexture.c
+index a10f44a..ec87f18 100644
+--- a/libs/dolphin/src/gx/GXTexture.c
++++ b/libs/dolphin/src/gx/GXTexture.c
+@@ -11,13 +11,21 @@ typedef struct __GXTexObjInt_struct {
+ 	u32 mode1;
+ 	u32 image0;
+ 	u32 image3;
++#ifdef TARGET_PC
++	/* A 32-bit slot, so the object fits the game's 32-byte GXTexObj with 8-byte pointers. */
++	u32 userData;
++#else
+ 	void* userData;
++#endif
+ 	GXTexFmt fmt;
+ 	u32 tlutName;
+ 	u16 loadCnt;
+ 	u8 loadFmt;
+ 	u8 flags;
+ } __GXTexObjInt;
++#ifdef TARGET_PC
++_Static_assert(sizeof(__GXTexObjInt) <= sizeof(GXTexObj), "GXTexObj holds the SDK's texture object");
++#endif
+ 
+ // GXTexRegion internal data
+ typedef struct __GXTexRegionInt_struct {
+@@ -289,14 +297,22 @@ void GXInitTexObjUserData(GXTexObj* obj, void* user_data)
+ {
+ 	__GXTexObjInt* t = (__GXTexObjInt*)obj;
+ 
++#ifdef TARGET_PC
++	t->userData = (u32)(uintptr_t)user_data;
++#else
+ 	t->userData = user_data;
++#endif
+ }
+ 
+ void* GXGetTexObjUserData(const GXTexObj* obj)
+ {
+ 	const __GXTexObjInt* t = (const __GXTexObjInt*)obj;
+ 
++#ifdef TARGET_PC
++	return (void*)(uintptr_t)t->userData;
++#else
+ 	return t->userData;
++#endif
+ }
+ 
+ void GXGetTexObjAll(const GXTexObj* obj, void** image_ptr, u16* width,

@@ -10,7 +10,7 @@ set(sms_pc_port_platform
   "${SMS_PC_PORT}/platform/misc/endian.cpp"
   "${SMS_PC_PORT}/platform/misc/msl_math.c" "${SMS_PC_PORT}/platform/misc/msl_rand.c"
   "${SMS_PC_PORT}/platform/mtx/mtx.cpp")
-file(GLOB sms_platform_sources CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/platform/*.cpp" "${CMAKE_SOURCE_DIR}/src/graphics/*.cpp" "${CMAKE_SOURCE_DIR}/src/game/*.cpp")
+file(GLOB sms_platform_sources CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/platform/*.cpp" "${CMAKE_SOURCE_DIR}/src/graphics/*.cpp")
 list(FILTER sms_platform_sources EXCLUDE REGEX "/audio_dsp\\.cpp$")
 add_library(sms_platform STATIC ${sms_platform_sources} ${sms_pc_port_platform})
 target_include_directories(sms_platform PUBLIC "${CMAKE_SOURCE_DIR}/src")
