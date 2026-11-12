@@ -1,0 +1,26 @@
+#!/bin/bash
+# PortMaster patcher script: prepares gamedata/ from the disc image
+# in gamefiles/. The patcher shows stdout and treats a clean exit as success.
+cd "$(dirname "$0")" || exit 1
+exec > >(tee setup.log) 2>&1
+set -o pipefail
+
+fail() {
+    echo "PATCH_FAIL_MSG:$1"
+    echo 'Patching process failed!'
+    exit 1
+}
+
+[ -x ./sunshine-setup ] || chmod +x ./sunshine-setup 2>/dev/null
+[ -x ./sunshine-setup ] || fail 'sunshine-setup is missing. Reinstall the port.'
+mkdir -p gamefiles
+echo 'Preparing Super Mario Sunshine from your disc image.'
+echo 'This runs once and needs about 1.1 GB of free space.'
+if ! ./sunshine-setup "$PWD/gamefiles" . sunshine-gamedata.sha1 | tee .setup-output; then
+    message=$(sed -n 's/^ERROR: //p' .setup-output | tail -n 1)
+    rm -f .setup-output
+    [ -n "$message" ] && fail "$(printf '%s' "$message" | awk '{print toupper(substr($0, 1, 1)) substr($0, 2) "."}')"
+    fail 'Game setup failed. Check sunshine/setup.log.'
+fi
+rm -f .setup-output
+echo 'Game files are ready.'

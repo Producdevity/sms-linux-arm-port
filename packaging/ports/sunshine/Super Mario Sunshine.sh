@@ -19,41 +19,31 @@ get_controls
 GAMEDIR="/$directory/ports/sunshine"
 cd "$GAMEDIR"
 > "$GAMEDIR/log.txt" && exec > >(tee "$GAMEDIR/log.txt") 2>&1
-# Bug reports come from log.txt alone: name the build and the device.
-echo "Package: $(cat VERSION 2>/dev/null || echo unknown)"
-echo "Device: $DEVICE_NAME ($DEVICE_CPU, ${DEVICE_RAM} GB), $CFW_NAME $CFW_VERSION, PortMaster $PM_VERSION, kernel $(uname -r)"
+# Testers send log.txt; this names the package and device even when the game never starts.
+echo "Package $(cat VERSION), $DEVICE_NAME ($DEVICE_CPU, ${DEVICE_RAM} GB), $CFW_NAME $CFW_VERSION, kernel $(uname -r)"
 
-# The player's disc image: plain ISO/GCM, or RVZ (Dolphin's default Zstandard or uncompressed).
-disc=""
-for f in gamefiles/*; do
-  case "${f,,}" in
-    *.iso|*.gcm|*.rvz) disc="$f"; break ;;
-  esac
-done
-if [ -z "$disc" ]; then
-  echo "No disc image in $GAMEDIR/gamefiles."
-  pm_message "Copy your Super Mario Sunshine disc image (USA, GMSE01) as .iso, .gcm or .rvz into sunshine/gamefiles."
-  sleep 5
-  pm_finish
-  exit 1
+# The first launch builds gamedata/ from the disc image in gamefiles/.
+if [ ! -f gamedata/.prepared ]; then
+  export PATCHER_FILE="$GAMEDIR/sunshine-prepare"
+  export PATCHER_GAME="Super Mario Sunshine"
+  export PATCHER_TIME="2 to 5 minutes"
+  $ESUDO chmod +x "$PATCHER_FILE"
+  source "$controlfolder/utils/patcher.txt"
+  # The patcher returns after a failed setup too; the game cannot run without gamedata/.
+  if [ ! -f gamedata/.prepared ]; then
+    pm_message "Game setup did not finish. See sunshine/setup.log."
+    sleep 5
+    pm_finish
+    exit 1
+  fi
 fi
-echo "Disc: $disc"
 
-# The first launch translates the game's code from the disc (a progress bar shows it) and
-# keeps the result in cache/ with the shader cache; memory cards are kept in saves/.
 export SDL_GAMECONTROLLERCONFIG="$sdl_controllerconfig"
 $ESUDO chmod +x "$GAMEDIR/sunshine.${DEVICE_ARCH}"
-mkdir -p saves cache
+mkdir -p saves shadercache
 
 $GPTOKEYB "sunshine.${DEVICE_ARCH}" &
 pm_platform_helper "$GAMEDIR/sunshine.${DEVICE_ARCH}"
-./sunshine.${DEVICE_ARCH} "$disc" saves cache
-status=$?
-
-# A crash would otherwise leave no trace in log.txt.
-if [ "$status" -gt 128 ] && [ "$status" -ne 143 ]; then
-  echo "The game was stopped by signal $((status - 128))."
-  dmesg 2>/dev/null | grep -i -A2 "sunshine" | tail -n 12
-fi
+./sunshine.${DEVICE_ARCH} gamedata saves shadercache
 
 pm_finish

@@ -11,9 +11,10 @@ request and ask; that is a good way to start.
 
 ## What belongs here
 
-This repository holds the Super Mario Sunshine port: its per-game configuration, build and
-packaging. Recompiler and runtime changes belong in [gc-recomp](https://github.com/Producdevity/gc-recomp); console and SDK behaviour that
-other ports share belongs in [Starlet](https://github.com/Producdevity/starlet).
+This repository holds the Super Mario Sunshine port: its patch series, platform code, build and
+packaging. Console and SDK behaviour that other ports share belongs in
+[Starlet](https://github.com/Producdevity/starlet). Platform code that every sms-pc-port target
+shares belongs in [sms-pc-port](https://github.com/chasem-dev/sms-pc-port).
 
 ## Pull requests
 
@@ -27,8 +28,7 @@ other ports share belongs in [Starlet](https://github.com/Producdevity/starlet).
 
 ## Testing
 
-- Build the port as the README describes. Changes to the recompiler or runtime go to gc-recomp
-  with its tests.
+- Build the port as the README describes.
 - Test on a handheld through its frontend and the PortMaster launcher, and name the device,
   firmware and GPU driver (for example Mali r20p0 or Panfrost).
 

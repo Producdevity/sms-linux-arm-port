@@ -11,9 +11,9 @@
     "porter": [
       "Producdevity"
     ],
-    "desc": "A native port of Super Mario Sunshine: the game's code is translated from your own disc on the device and runs on gc-recomp and Starlet.",
+    "desc": "A native port of Super Mario Sunshine, built from the sms-english decompilation with sms-pc-port's platform code and Starlet.",
     "desc_md": null,
-    "inst": "Copy your own disc image of Super Mario Sunshine (USA, GMSE01) as .iso, .gcm or .rvz to the sunshine/gamefiles folder, next to the Super Mario Sunshine launcher in your ports folder. The first launch translates the game's code from the disc, which takes a few seconds.",
+    "inst": "Copy your own disc image of Super Mario Sunshine (USA, GMSE01) as .iso, .gcm, .rvz or .wia to the sunshine/gamefiles folder, next to the Super Mario Sunshine launcher in your ports folder. The first launch prepares the game files on the device, which takes a few minutes and about 1.1 GB of free space.",
     "inst_md": null,
     "genres": [
       "platformer"
@@ -28,6 +28,6 @@
     "arch": [
       "aarch64"
     ],
-    "min_glibc": "2.27"
+    "min_glibc": "2.30"
   }
 }

@@ -1,47 +1,59 @@
 # Super Mario Sunshine
 
-A native port of Super Mario Sunshine for Linux AArch64 handhelds. The package holds no game code:
-the first launch translates the game's code from your own disc with gc-recomp and
-keeps the result in `sunshine/cache`.
+A native port of Super Mario Sunshine, built from the
+[sms-english](https://github.com/chasem-dev/sms-english) decompilation (CC0) with the platform
+code of [sms-pc-port](https://github.com/chasem-dev/sms-pc-port) (MIT). The game draws through
+[Starlet](https://github.com/Producdevity/starlet) (GPL-3.0). This project is not affiliated with
+Nintendo.
+
+No game data is included. You need your own copy of Super Mario Sunshine.
 
 ## Installation
 
-Copy your disc image of Super Mario Sunshine (USA, GMSE01, revision 0) into `sunshine/gamefiles`.
-Accepted: `.iso`, `.gcm`, and `.rvz` as Dolphin saves it by default (Zstandard) or
-uncompressed. RVZ images compressed with bzip2 or LZMA need converting again with
-Dolphin's defaults, or to ISO.
+1. Dump your own Super Mario Sunshine disc (USA, game ID `GMSE01`) and keep it as `.iso`,
+   `.gcm`, `.rvz` or `.wia`. Other formats (NKit, GCZ, CISO, WBFS) need converting first, for
+   example with Dolphin.
+2. Install the port, then copy the disc image into `sunshine/gamefiles/`. The `sunshine` folder
+   sits in your ports folder, next to the `Super Mario Sunshine.sh` launcher. On muOS it is
+   `ports/sunshine` at the top of the card, while the launcher is in `ROMS/Ports`, and with two
+   cards PortMaster uses the second one. Any filename works.
+3. Launch Super Mario Sunshine from the Ports list. The first launch extracts the game files on
+   the device, which takes a few minutes and needs about 1.1 GB of free space. You can delete the
+   disc image afterwards.
 
-Memory card A is kept in `sunshine/saves/USA/Card A` as Dolphin GCI files.
-Copy them to or from Dolphin's `GC/USA/Card A` folder to move saves between the two.
-A card from an earlier version (`saves/memcard-a.raw`) is imported on first launch
-and kept as `memcard-a.raw.imported`.
+## Saves
+
+The memory card is the folder `sunshine/saves/USA/Card A`, laid out like Dolphin's GCI folder:
+each save file is one `.gci` file. Back it up by copying the folder. To move saves between
+Dolphin and the port, copy the `.gci` files between Dolphin's `GC/USA/Card A` folder and this one.
+
+## Troubleshooting
+
+`sunshine/log.txt` describes the last launch, including the reason when the game stops;
+`sunshine/setup.log` describes the first-launch setup. Include them when you report a problem.
 
 ## Controls
 
-Buttons are named by position, since handhelds print different labels on them.
+Buttons follow the Nintendo layout: A is the right face button, B the
+bottom, X the top and Y the left.
 
-| Handheld | GameCube |
+| Button | GameCube control |
 |--|--|
-| Bottom face button | A |
-| Left face button | B |
-| Right face button | X |
-| Top face button | Y |
-| L1, L2 | L |
-| R2 | R |
-| R1 | Z |
-| Start | Start |
-| D-Pad | D-Pad |
+| A, B, X, Y | A, B, X, Y (Nintendo layout) |
+| L1 / R1 | L / R |
+| L2 / R2 | Z |
 | Left stick | Control stick |
 | Right stick | C stick |
-
-PortMaster's exit chord (usually Select + Start) quits and saves the memory card.
+| D-pad | D-pad |
+| Start | Start |
+| Select + Start | Exit and save the memory card |
 
 ## Notes
 
-- Requires OpenGL ES 3.1 and glibc 2.27 or newer.
-- `sunshine/log.txt` holds the log of the last run.
+- Requires OpenGL ES 3.1 and glibc 2.30 or newer.
 
 ## Thanks
 
-- Function list: [doldecomp/sms](https://github.com/doldecomp/sms), the Super Mario Sunshine decompilation (CC0).
-- Rendering: Starlet (GPL-3.0). RVZ decompression: zstd (BSD).
+- [sms-english](https://github.com/chasem-dev/sms-english), the Super Mario Sunshine decompilation (CC0).
+- [sms-pc-port](https://github.com/chasem-dev/sms-pc-port): platform code (MIT).
+- Starlet (GPL-3.0). RVZ decompression: zstd (BSD).

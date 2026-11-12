@@ -4,7 +4,7 @@
     <path>./Super Mario Sunshine.sh</path>
     <name>Super Mario Sunshine</name>
     <image>./sunshine/cover.jpg</image>
-    <desc>Mario and FLUDD clean up Isle Delfino after a look-alike covers it in goop and the Shine Sprites scatter. A native port that needs your own copy of the game.</desc>
+    <desc>Mario and FLUDD clean up Isle Delfino after a look-alike covers it in goop and the Shine Sprites scatter. A native port built from the sms-english decompilation; it needs your own copy of the game.</desc>
     <releasedate>20020826T000000</releasedate>
     <developer>Nintendo EAD</developer>
     <publisher>Nintendo</publisher>

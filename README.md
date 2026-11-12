@@ -1,32 +1,68 @@
-# Super Mario Sunshine for Linux AArch64 handhelds
+# Super Mario Sunshine Linux ARM
 
-A native port of Super Mario Sunshine on gc-recomp and Starlet. The first launch translates the
-game's code from the player's own disc; the repository and the package hold no game
-code. The PortMaster package and its player notes are in
+A native Linux AArch64 port of Super Mario Sunshine for handhelds that run
+[PortMaster](https://portmaster.games). The game is built from
+[sms-english](https://github.com/chasem-dev/sms-english), the decompilation of the GameCube game,
+with the platform code of [sms-pc-port](https://github.com/chasem-dev/sms-pc-port) (MIT). It
+draws with [Starlet](https://github.com/Producdevity/starlet), a GameCube and Wii compatibility
+layer. This project is not affiliated with Nintendo.
+
+No game data is distributed. You need your own copy of Super Mario Sunshine (USA, game ID
+GMSE01) as an ISO, GCM, RVZ or WIA image. The PortMaster package and its player notes are in
 [packaging/ports/sunshine](packaging/ports/sunshine/README.md).
 
-## Building
+## Source layout
 
-Clone with the submodules (gc-recomp, and Starlet inside it):
+- `third_party/sms`: the pinned decompilation, never edited (`third_party/sms.lock.json`).
+- `third_party/sms-pc-port`: sms-pc-port, pinned; its platform code is compiled in and its
+  decompilation patches are applied.
+- `third_party/starlet`: Starlet, pinned to the revision the release was built with.
+- `patches/sms`: the patch series (`series` lists sms-pc-port's patches, then this port's own),
+  applied to a generated copy of the decompilation at build time by `tools/prepare_sms.py`.
+- `src/platform`: console services the SDK calls land on, besides Starlet's modules.
+- `src/graphics`: GX support code.
+- `src/compat`: SDK structure layout and compatibility headers.
+- `src/setup`: `sunshine-setup`, which extracts the disc image on the device with Starlet's
+  disc module.
+- `src/application`: the executable.
+- `packaging/ports/sunshine`, `tools/package-portmaster.sh`: the PortMaster package.
+
+## Build
+
+Requirements: CMake 3.24+, Ninja, Python 3.9+, Clang and LLD, and an aarch64 sysroot with SDL2
+and GLES 3.1. Clone with the submodules:
 
 ```sh
 git clone --recurse-submodules <repository URL>
 ```
 
-Cross-compile for AArch64 Linux with clang and a Debian bullseye arm64 sysroot that has
-SDL2 and GLES 3 development files. Build gc-recomp's host `gcrecomp` first, then:
+Handheld build:
 
 ```sh
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_TOOLCHAIN_FILE=third_party/gc-recomp/cmake/aarch64-linux.cmake \
-  -DGC_SYSROOT=<sysroot> -DGC_CLANG=<clang> -DGC_CLANGXX=<clang++> -DGC_LLD=<ld.lld> \
-  -DGC_RECOMPILER=<host gcrecomp> -DSTARLET_GLES_INCLUDE_DIR=<sysroot>/usr/include \
-  -DSTARLET_GLES_LIBRARY=<sysroot>/usr/lib/aarch64-linux-gnu/libGLESv2.so
-cmake --build build --target sunshine
-tools/package-portmaster.sh build dist
+cmake -S . -B build/aarch64 -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DCMAKE_TOOLCHAIN_FILE=cmake/aarch64-linux.cmake -DSMS_SYSROOT=SYSROOT \
+    -DSMS_CLANG=clang -DSMS_CLANGXX=clang++ -DSMS_LLD=ld.lld -DSMS_GLES=ON
+cmake --build build/aarch64 --target sunshine sunshine-setup
 ```
 
-`-DGC_RECOMP_DIR=<checkout>` builds against a local gc-recomp instead of the submodule.
+`-DSMS_STARLET_DIR=DIR` builds against another Starlet checkout, and `-DSMS_DECOMP_DIR=DIR`
+against a decompilation working tree instead of the pinned one.
+
+## Package
+
+The packager needs `screenshot.jpg` and `cover.jpg` (640x480) in `packaging/ports/sunshine`.
+They are device captures and stay out of the repository.
+
+```sh
+tools/package-portmaster.sh build/aarch64 dist
+```
+
+It writes the port folder `dist/sunshine` and `dist/sunshine.zip`. Set
+`PROGRAM_LIST=FILE` to ship a recorded Starlet program list. Builds configured with
+`-DSMS_DEV_TOOLS=ON` are refused.
+
+`tools/assets/GMSE01-gamedata.sha1` lists the SHA-1 of every file `sunshine-setup` extracts. The
+package ships it as `sunshine-gamedata.sha1`, and setup rejects any file that differs.
 
 ## Contributing
 
@@ -35,7 +71,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 ## Licenses
 
 This project is licensed under the GNU General Public License v3.0; see
-[LICENSE](LICENSE). gc-recomp and Starlet are GPL-3.0, the function list from
-doldecomp/sms, the Super Mario Sunshine decompilation is CC0-1.0, and the Zstandard
-decoder Starlet links is BSD-licensed; see [third-party material](THIRD_PARTY.md). Code
-translated from the player's disc remains the game's and is not covered by this license.
+[LICENSE](LICENSE). The decompilation is CC0-1.0, sms-pc-port is MIT, Starlet is GPL-3.0, and
+the Zstandard decoder Starlet links is BSD-licensed; see
+[third-party notices](THIRD_PARTY_NOTICES.md).
