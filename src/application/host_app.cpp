@@ -26,6 +26,7 @@
 #include <GLES3/gl31.h>
 #include <SDL.h>
 
+#include <dirent.h>
 #include <dlfcn.h>
 #include <sys/stat.h>
 #include <execinfo.h>
@@ -338,6 +339,85 @@ private:
     starlet::ai::Stats ai_{};
 };
 
+// Development: SMS_PERF prints, every 10 s, the presented frame rate and the CPU time per presented
+// frame of each thread that used more than 1 ms per frame (from /proc/self/task), with the process RSS.
+std::atomic<unsigned long> presented_frames{0};
+class PerfStats {
+public:
+    void sample() {
+        if (!enabled_) return;
+        const Uint32 now = SDL_GetTicks();
+        if (last_ == 0) {
+            last_ = now;
+            frames_ = presented_frames;
+            read_threads(previous_);
+            return;
+        }
+        if (now - last_ < 10000) return;
+        const unsigned long frames = presented_frames - frames_;
+        std::vector<Thread> current;
+        read_threads(current);
+        const double seconds = (now - last_) / 1000.0;
+        std::string line;
+        char item[96];
+        for (const Thread& t : current) {
+            unsigned long long before = 0;
+            for (const Thread& p : previous_)
+                if (p.tid == t.tid) before = p.ticks;
+            const double ms = frames ? (t.ticks - before) * 1000.0 / ticks_per_second_ / frames : 0;
+            if (ms < 1.0) continue;
+            std::snprintf(item, sizeof item, " %s %.1f", t.name.c_str(), ms);
+            line += item;
+        }
+        long rss_pages = 0;
+        if (FILE* f = std::fopen("/proc/self/statm", "r")) {
+            long size = 0;
+            if (std::fscanf(f, "%ld %ld", &size, &rss_pages) != 2) rss_pages = 0;
+            std::fclose(f);
+        }
+        std::printf("perf: %.1f fps, rss %ld MiB, CPU ms per frame:%s\n", frames / seconds, rss_pages * 4096 / 1048576,
+                    line.c_str());
+        std::fflush(stdout);
+        last_ = now;
+        frames_ = presented_frames;
+        previous_ = current;
+    }
+
+private:
+    struct Thread {
+        long tid;
+        std::string name;
+        unsigned long long ticks;
+    };
+    static void read_threads(std::vector<Thread>& out) {
+        out.clear();
+        DIR* dir = opendir("/proc/self/task");
+        if (!dir) return;
+        while (dirent* entry = readdir(dir)) {
+            if (entry->d_name[0] == '.') continue;
+            char path[64], buffer[512];
+            std::snprintf(path, sizeof path, "/proc/self/task/%s/stat", entry->d_name);
+            FILE* f = std::fopen(path, "r");
+            if (!f) continue;
+            const size_t n = std::fread(buffer, 1, sizeof buffer - 1, f);
+            std::fclose(f);
+            buffer[n] = 0;
+            char* open = std::strchr(buffer, '(');
+            char* close = std::strrchr(buffer, ')');
+            if (!open || !close) continue;
+            unsigned long long user = 0, system = 0;
+            if (std::sscanf(close + 2, "%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu", &user, &system) != 2) continue;
+            out.push_back({std::atol(entry->d_name), std::string(open + 1, close), user + system});
+        }
+        closedir(dir);
+    }
+    bool enabled_ = std::getenv("SMS_PERF") != nullptr;
+    long ticks_per_second_ = sysconf(_SC_CLK_TCK);
+    Uint32 last_ = 0;
+    unsigned long frames_ = 0;
+    std::vector<Thread> previous_;
+};
+
 // Earlier releases kept slot A in <saves>/card_a with a card_state.txt; it becomes Dolphin's
 // folder for the USA disc, where starlet::card keeps it.
 void adopt_old_card(const std::string& saves) {
@@ -542,6 +622,7 @@ int run_checked(int argc, char** argv, int (*guest_main)()) {
     renderer.set_swap([&display] {
         captures.before_swap();
         SDL_GL_SwapWindow(display.window);
+        ++presented_frames;
         starlet::gx_fifo::frame_event('W');
         starlet::os::profile_frame();
     });
@@ -591,6 +672,7 @@ int run_checked(int argc, char** argv, int (*guest_main)()) {
 
     start_profiler();
     AudioStats audio_stats;
+    PerfStats perf_stats;
     Controller controller;
     controller.sample();
     std::atomic<bool> game_returned{false};
@@ -630,6 +712,7 @@ int run_checked(int argc, char** argv, int (*guest_main)()) {
         }
         controller.sample();
         audio_stats.sample();
+        perf_stats.sample();
         SDL_Delay(4);
     }
     std::printf("The game's main() returned\n");
