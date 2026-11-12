@@ -45,6 +45,9 @@ cmake -S . -B build/aarch64 -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
 cmake --build build/aarch64 --target sunshine sunshine-setup
 ```
 
+The build renames the game's global `operator new` and `delete` with `llvm-objcopy`. When it is not
+on `PATH` (Homebrew's LLVM on a Mac), set `LLVM_BIN` to its directory before configuring.
+
 `-DSMS_STARLET_DIR=DIR` builds against another Starlet checkout, and `-DSMS_DECOMP_DIR=DIR`
 against a decompilation working tree instead of the pinned one.
 

@@ -67,7 +67,7 @@ set_source_files_properties(${SMS_DECOMP_PCH_SOURCES} PROPERTIES COMPILE_OPTIONS
 # The game defines the global operator new and delete over JKRHeap. They are renamed, with every
 # reference in the game library, so game code allocates from its JKR heaps and everything else
 # (Starlet, the converters, the host libraries) from malloc.
-find_program(SMS_OBJCOPY NAMES llvm-objcopy PATHS /opt/homebrew/opt/llvm/bin REQUIRED)
+find_program(SMS_OBJCOPY NAMES llvm-objcopy llvm-objcopy-19 HINTS ENV LLVM_BIN REQUIRED)
 file(WRITE "${CMAKE_BINARY_DIR}/game_new_syms.txt"
   "_Znwm __sms_game_new\n_Znam __sms_game_new_array\n_ZdlPv __sms_game_delete\n_ZdaPv __sms_game_delete_array\n")
 add_custom_command(TARGET sms_game POST_BUILD
