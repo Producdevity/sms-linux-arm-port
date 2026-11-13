@@ -594,6 +594,8 @@ int run_checked(int argc, char** argv, int (*guest_main)()) {
     // to ARAM, which would otherwise write a dead copy's texels over it. On the R36S cave
     // stamps cost no measurable frame time.
     limits.direct.stamp_resident_copies = true;
+    // Draw-sync callbacks test single EFB pixels (the sun's depth, Mario's alpha): full-resolution snapshots.
+    limits.direct.snapshot_scale = 1;
     // Programs missing during play (Starlet GlesDirectLimits). On muos_35-h from an empty cache,
     // two normal-priority workers and a GL-thread link after 50 ms, at most every 250 ms, skipped
     // 4.5 times fewer draws than Starlet's defaults with similar long frames.
