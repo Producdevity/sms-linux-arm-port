@@ -128,6 +128,8 @@ private:
 // Nintendo layout (A right, B below, X above, Y left); SDL names them by the
 // Xbox positions, so label A reads SDL B, label B SDL A, label X SDL Y, label Y SDL X.
 extern "C" unsigned sunshine_game_state();
+extern "C" void sunshine_request_warp(int code);
+extern "C" void sunshine_pad_read_hook();
 
 class Controller {
 public:
@@ -182,6 +184,12 @@ public:
             while (*name_end && *name_end != ',') ++name_end;
             p = *name_end ? name_end + 1 : name_end;
         }
+        // SMS_WARP=CODE changes stage when the press script ends, through TMarDirector::setNextStage
+        // on the game thread (CODE: (stage + 1) << 8 | scenario).
+        if (const char* warp = std::getenv("SMS_WARP")) {
+            warp_ = int(std::strtol(warp, nullptr, 0));
+            starlet::pad::set_read_hook(sunshine_pad_read_hook);
+        }
         if (std::getenv("SMS_PAD_TRACE"))
             std::printf("controller: %zu scripted presses\n", script_.size());
         attach_virtual_pad();
@@ -223,6 +231,10 @@ public:
             if (end_at_ && now >= end_at_ && !script_.empty()) {
                 std::printf("controller: press script ended at %u ms\n", now);
                 script_.clear();
+                if (warp_) {
+                    std::printf("controller: warp to 0x%x\n", unsigned(warp_));
+                    sunshine_request_warp(warp_);
+                }
             }
         }
         for (const Press& press : script_)
@@ -354,6 +366,7 @@ private:
     std::vector<Until> until_;
     size_t matched_ = 0;
     Uint32 tail_ms_ = 0, end_at_ = 0;
+    int warp_ = 0;
     struct Press {
         Uint32 at, hold;
         std::uint16_t buttons;

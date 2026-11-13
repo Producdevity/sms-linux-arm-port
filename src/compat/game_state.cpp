@@ -28,3 +28,21 @@ extern "C" unsigned sunshine_game_state()
 	}
 	return progress << 24 | state << 16 | stage << 8 | scenario;
 }
+
+// Development: a stage change requested by the host's press script, made on the game thread from
+// its PADRead through the director's own setNextStage (code: (stage + 1) << 8 | scenario).
+static int warp_code;
+
+extern "C" void sunshine_request_warp(int code)
+{
+	__atomic_store_n(&warp_code, code, __ATOMIC_RELEASE);
+}
+
+extern "C" void sunshine_pad_read_hook()
+{
+	const int code = __atomic_load_n(&warp_code, __ATOMIC_ACQUIRE);
+	if (!code || gpApplication.mAppState != TApplication::APP_STATE_GAMEPLAY || !gpMarDirector)
+		return;
+	__atomic_store_n(&warp_code, 0, __ATOMIC_RELAXED);
+	gpMarDirector->setNextStage(code, nullptr);
+}
