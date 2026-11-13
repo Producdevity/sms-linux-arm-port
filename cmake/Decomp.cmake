@@ -44,7 +44,8 @@ target_compile_definitions(sms_headers INTERFACE GEKKO TARGET_PC VERSION_GMSE01 
 target_compile_options(sms_headers INTERFACE "$<$<COMPILE_LANGUAGE:CXX>:-Wno-register>")
 
 add_library(sms_game STATIC ${SMS_DECOMP_CXX_SOURCES} ${SMS_DECOMP_C_SOURCES} ${sms_gx_sources}
-  "${CMAKE_SOURCE_DIR}/src/graphics/gx_misc.c" "${CMAKE_SOURCE_DIR}/src/compat/sdk_layout_game.cpp")
+  "${CMAKE_SOURCE_DIR}/src/graphics/gx_misc.c" "${CMAKE_SOURCE_DIR}/src/compat/sdk_layout_game.cpp"
+  "${CMAKE_SOURCE_DIR}/src/compat/game_state.cpp")
 set_source_files_properties("${CMAKE_SOURCE_DIR}/src/graphics/gx_misc.c" PROPERTIES
   INCLUDE_DIRECTORIES "${SMS_DECOMP}/libs/dolphin/src/gx")
 target_link_libraries(sms_game PUBLIC sms_headers)

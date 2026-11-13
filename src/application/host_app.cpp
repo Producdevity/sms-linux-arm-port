@@ -127,13 +127,27 @@ private:
 // GameCube controller from the handheld's pad. Face buttons follow the printed
 // Nintendo layout (A right, B below, X above, Y left); SDL names them by the
 // Xbox positions, so label A reads SDL B, label B SDL A, label X SDL Y, label Y SDL X.
+extern "C" unsigned sunshine_game_state();
+
 class Controller {
 public:
     // Development: SMS_PRESS="seconds:INPUT[:milliseconds],..." holds each input at
     // that time since start, for 150 ms unless given. Inputs: A B X Y Z L R START
     // UP DOWN LEFT RIGHT (D-pad), STICK_UP/DOWN/LEFT/RIGHT and C_UP/DOWN/LEFT/RIGHT
-    // (full deflection).
+    // (full deflection). "seconds:INPUT[:milliseconds]@STATE[:STAGE[:PROGRESS]]" presses only while the
+    // game is in that TApplication state, stage and title/file-select TCardLoad progress. SMS_PRESS_UNTIL="STATE[:STAGE]>..." ends the script once the game has
+    // passed through those TApplication states (9 file select, 5 gameplay) and stages in order,
+    // and a final "+SECONDS" later; state changes are logged as "game state:" lines.
     Controller() {
+        for (const char* p = std::getenv("SMS_PRESS_UNTIL"); p && *p;) {
+            char* end = nullptr;
+            Until step{int(std::strtol(p, &end, 0)), -1};
+            if (end == p) break;
+            if (*end == ':') step.stage = int(std::strtol(end + 1, &end, 0));
+            until_.push_back(step);
+            if (*end == '+') tail_ms_ = Uint32(std::strtod(end + 1, &end) * 1000);
+            p = *end == '>' ? end + 1 : end;
+        }
         start_ = SDL_GetTicks();
         const char* script = std::getenv("SMS_PRESS");
         for (const char* p = script; p && *p;) {
@@ -142,11 +156,18 @@ public:
             if (end == p || *end != ':') break;
             p = end + 1;
             const char* name_end = p;
-            while (*name_end && *name_end != ',' && *name_end != ':') ++name_end;
+            while (*name_end && *name_end != ',' && *name_end != ':' && *name_end != '@') ++name_end;
             const std::string name(p, name_end);
             Uint32 hold = 150;
             if (*name_end == ':') {
                 hold = Uint32(std::strtoul(name_end + 1, &end, 10));
+                name_end = end;
+            }
+            int only_state = -1, only_stage = -1, only_progress = -1;
+            if (*name_end == '@') {
+                only_state = int(std::strtol(name_end + 1, &end, 0));
+                if (*end == ':') only_stage = int(std::strtol(end + 1, &end, 0));
+                if (*end == ':') only_progress = int(std::strtol(end + 1, &end, 0));
                 name_end = end;
             }
             static const struct { const char* name; std::uint16_t bits; std::int8_t sx, sy, cx, cy; } names[] = {
@@ -155,7 +176,9 @@ public:
                 {"STICK_UP", 0, 0, 72}, {"STICK_DOWN", 0, 0, -72}, {"STICK_LEFT", 0, -72, 0}, {"STICK_RIGHT", 0, 72, 0},
                 {"C_UP", 0, 0, 0, 0, 59}, {"C_DOWN", 0, 0, 0, 0, -59}, {"C_LEFT", 0, 0, 0, -59, 0}, {"C_RIGHT", 0, 0, 0, 59, 0}};
             for (const auto& n : names)
-                if (name == n.name) script_.push_back({Uint32(seconds * 1000), hold, n.bits, n.sx, n.sy, n.cx, n.cy});
+                if (name == n.name)
+                    script_.push_back({Uint32(seconds * 1000), hold, n.bits, n.sx, n.sy, n.cx, n.cy, only_state, only_stage,
+                                       only_progress});
             while (*name_end && *name_end != ',') ++name_end;
             p = *name_end ? name_end + 1 : name_end;
         }
@@ -185,8 +208,28 @@ public:
             std::printf("controller: %u ms sampled\n", now);
             std::fflush(stdout);
         }
+        if (watch_) {
+            const unsigned game = sunshine_game_state();
+            if (game != game_state_) {
+                game_state_ = game;
+                std::printf("game state: %u ms app %u stage 0x%02x scenario %u card progress %d\n", now,
+                            (game >> 16) & 0xff, (game >> 8) & 0xff, game & 0xff, int(game >> 24) - 1);
+                std::fflush(stdout);
+                if (matched_ < until_.size() && int((game >> 16) & 0xff) == until_[matched_].state &&
+                    (until_[matched_].stage < 0 || int((game >> 8) & 0xff) == until_[matched_].stage) &&
+                    ++matched_ == until_.size())
+                    end_at_ = now + tail_ms_;
+            }
+            if (end_at_ && now >= end_at_ && !script_.empty()) {
+                std::printf("controller: press script ended at %u ms\n", now);
+                script_.clear();
+            }
+        }
         for (const Press& press : script_)
-            if (now >= press.at && now < press.at + press.hold) {
+            if (now >= press.at && now < press.at + press.hold &&
+                (press.state < 0 || int((game_state_ >> 16) & 0xff) == press.state) &&
+                (press.stage < 0 || int((game_state_ >> 8) & 0xff) == press.stage) &&
+                (press.progress < 0 || int(game_state_ >> 24) - 1 == press.progress)) {
                 state.connected = true;
                 state.buttons |= press.buttons;
                 if (press.stick_x || press.stick_y) {
@@ -305,10 +348,17 @@ private:
                                          std::fflush(stdout);
                                      }};
     Uint32 heartbeat_ = 0;
+    const bool watch_ = std::getenv("SMS_PRESS") != nullptr;
+    unsigned game_state_ = ~0u;
+    struct Until { int state, stage; };
+    std::vector<Until> until_;
+    size_t matched_ = 0;
+    Uint32 tail_ms_ = 0, end_at_ = 0;
     struct Press {
         Uint32 at, hold;
         std::uint16_t buttons;
         std::int8_t stick_x, stick_y, c_x, c_y;
+        int state, stage, progress;
     };
     std::vector<Press> script_;
     Uint32 start_ = 0;
@@ -339,7 +389,7 @@ private:
     starlet::ai::Stats ai_{};
 };
 
-// Development: SMS_PERF prints, every 10 s, the presented frame rate and the CPU time per presented
+// Development: SMS_PERF prints, every 10 s (SMS_PERF=N: every N s), the presented frame rate and the CPU time per presented
 // frame of each thread that used more than 1 ms per frame (from /proc/self/task), with the process RSS.
 std::atomic<unsigned long> presented_frames{0};
 class PerfStats {
@@ -353,7 +403,7 @@ public:
             read_threads(previous_);
             return;
         }
-        if (now - last_ < 10000) return;
+        if (now - last_ < period_ms_) return;
         const unsigned long frames = presented_frames - frames_;
         std::vector<Thread> current;
         read_threads(current);
@@ -412,6 +462,7 @@ private:
         closedir(dir);
     }
     bool enabled_ = std::getenv("SMS_PERF") != nullptr;
+    Uint32 period_ms_ = enabled_ && std::atoi(std::getenv("SMS_PERF")) > 1 ? Uint32(std::atoi(std::getenv("SMS_PERF"))) * 1000 : 10000;
     long ticks_per_second_ = sysconf(_SC_CLK_TCK);
     Uint32 last_ = 0;
     unsigned long frames_ = 0;
