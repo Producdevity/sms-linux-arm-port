@@ -25,6 +25,9 @@
 
 #include <GLES3/gl31.h>
 #include <SDL.h>
+#ifdef PORT_HAS_OVERLAY
+#include <spo.h>
+#endif
 
 #include <dirent.h>
 #include <dlfcn.h>
@@ -42,6 +45,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -79,6 +83,80 @@ struct Display {
 };
 
 std::atomic<int> drawable_width{0}, drawable_height{0};
+
+// The settings menu and performance overlay (sbc-port-overlay). Its calls are serialized on one
+// mutex: events and the controller sample run on the main thread, frames on the GL thread. Every
+// function compiles to nothing without PORT_HAS_OVERLAY.
+namespace overlay {
+#ifdef PORT_HAS_OVERLAY
+std::mutex lock;
+bool active = false;
+
+void* resolve(const char* name, void*) { return SDL_GL_GetProcAddress(name); }
+
+// The GL context current on the calling thread.
+void init() {
+    mkdir("conf", 0755);
+    spo_config config{};
+    config.struct_size = sizeof config;
+    config.abi_version = SPO_ABI_VERSION;
+    config.get_proc_address = resolve;
+    config.config_path = "conf/overlay.ini";
+    config.port_name = "Super Mario Sunshine";
+    config.port_version = sunshine_port_version;
+    const spo_result result = spo_init(&config);
+    active = result == SPO_OK;
+    if (!active) std::printf("Overlay: unavailable (%d)\n", int(result));
+}
+void handle(const SDL_Event& event) {
+    if (!active) return;
+    std::lock_guard<std::mutex> guard(lock);
+    spo_handle_sdl_event(reinterpret_cast<const union SDL_Event*>(&event));
+}
+bool captured() {
+    if (!active) return false;
+    std::lock_guard<std::mutex> guard(lock);
+    return spo_input_captured() != 0;
+}
+// Before every swap, on the thread that owns the context.
+void frame(int width, int height) {
+    if (!active) return;
+    std::lock_guard<std::mutex> guard(lock);
+    spo_frame(std::uint32_t(width), std::uint32_t(height));
+}
+void save() {
+    if (!active) return;
+    std::lock_guard<std::mutex> guard(lock);
+    if (spo_config_dirty()) spo_config_save();
+}
+// A safe point: the menu is closed and drained. A failed save is not retried until the next change.
+void save_when_closed() {
+    static bool failed = false;
+    if (!active || failed) return;
+    std::lock_guard<std::mutex> guard(lock);
+    if (spo_input_captured() || !spo_config_dirty()) return;
+    if (spo_config_save() != SPO_OK) {
+        failed = true;
+        std::printf("Overlay: settings not saved (%d)\n", int(spo_last_error()));
+    }
+}
+// On the GL thread, before it releases the context.
+void shutdown() {
+    if (!active) return;
+    std::lock_guard<std::mutex> guard(lock);
+    spo_shutdown();
+    active = false;
+}
+#else
+void init() {}
+void handle(const SDL_Event&) {}
+bool captured() { return false; }
+void frame(int, int) {}
+void save() {}
+void save_when_closed() {}
+void shutdown() {}
+#endif
+}
 
 // Development captures: SMS_CAPTURE_FRAMES lists swap numbers whose presented
 // image is written as SMS_CAPTURE_DIR/sunshine-frame-N.ppm.
@@ -198,7 +276,10 @@ public:
         pads_.update();
         drive_virtual_pad();
         starlet::pad::PadState state;
-        const auto pad = starlet::host::to_gamecube(pads_.state(0), mapping());
+        // While the menu has the controller the game reads a pad at rest, still connected.
+        auto raw = pads_.state(0);
+        if (raw.connected && overlay::captured()) raw = starlet::host::Gamepad{true};
+        const auto pad = starlet::host::to_gamecube(raw, mapping());
         if (pad.connected) {
             state.connected = true;
             state.buttons = pad.buttons;
@@ -545,7 +626,7 @@ void prepare_programs(starlet::gx::GlesRenderer& renderer, SDL_Window* window) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glViewport(0, 0, width, height);
         for (; s.running && !s.lists_done; s = renderer.program_builder()) {
-            starlet::host::poll_events();
+            starlet::host::poll_events(overlay::handle);
             if (starlet::host::quit_requested()) {
                 std::printf("Exit requested by the frontend\n");
                 starlet::host::exit_now(0);
@@ -564,6 +645,7 @@ void prepare_programs(starlet::gx::GlesRenderer& renderer, SDL_Window* window) {
                 glClear(GL_COLOR_BUFFER_BIT);
             }
             glDisable(GL_SCISSOR_TEST);
+            overlay::frame(width, height);
             SDL_GL_SwapWindow(window);
             SDL_Delay(30);
         }
@@ -631,10 +713,12 @@ int run_checked(int argc, char** argv, int (*guest_main)()) {
     starlet::host::install_quit_signals();
     starlet::host::on_quit([] {
         starlet::card::finish_card_writes(std::chrono::milliseconds(400));
+        overlay::save();
         write_instrumented_profile();
     });
     starlet::host::exit_after_quit(std::chrono::milliseconds(500));
     std::printf("GL renderer: %s, %s\n", glGetString(GL_RENDERER), glGetString(GL_VERSION));
+    overlay::init();
     int width = 0, height = 0;
     SDL_GL_GetDrawableSize(display.window, &width, &height);
     drawable_width = width;
@@ -686,6 +770,7 @@ int run_checked(int argc, char** argv, int (*guest_main)()) {
     prepare_programs(renderer, display.window);
     static Captures captures;
     renderer.set_swap([&display] {
+        overlay::frame(drawable_width, drawable_height);
         captures.before_swap();
         SDL_GL_SwapWindow(display.window);
         ++presented_frames;
@@ -716,7 +801,10 @@ int run_checked(int argc, char** argv, int (*guest_main)()) {
                                       starlet::os::name_thread("sms-gl");
                                       SDL_GL_MakeCurrent(display.window, display.gl);
                                   },
-                                  [&display] { SDL_GL_MakeCurrent(display.window, nullptr); });
+                                  [&display] {
+                                      overlay::shutdown();
+                                      SDL_GL_MakeCurrent(display.window, nullptr);
+                                  });
     };
     gpu.stop = [&renderer] {
         if (!inline_gl) renderer.stop_submission();
@@ -769,7 +857,7 @@ int run_checked(int argc, char** argv, int (*guest_main)()) {
             std::fflush(nullptr);
             std::_Exit(0);
         }
-        starlet::host::poll_events();
+        starlet::host::poll_events(overlay::handle);
         if (starlet::host::quit_requested()) {
             std::printf("Exit requested by the frontend\n");
             summarize();
@@ -777,6 +865,7 @@ int run_checked(int argc, char** argv, int (*guest_main)()) {
             starlet::host::exit_now(0);
         }
         controller.sample();
+        overlay::save_when_closed();
         audio_stats.sample();
         perf_stats.sample();
         SDL_Delay(4);

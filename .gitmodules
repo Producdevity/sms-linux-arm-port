@@ -7,3 +7,6 @@
 [submodule "third_party/starlet"]
 	path = third_party/starlet
 	url = https://github.com/Producdevity/starlet.git
+[submodule "third_party/sbc-port-overlay"]
+	path = third_party/sbc-port-overlay
+	url = https://github.com/Producdevity/sbc-port-overlay.git
