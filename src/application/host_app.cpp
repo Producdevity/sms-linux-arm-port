@@ -214,10 +214,11 @@ public:
     // Development: SMS_PRESS="seconds:INPUT[:milliseconds],..." holds each input at
     // that time since start, for 150 ms unless given. Inputs: A B X Y Z L R START
     // UP DOWN LEFT RIGHT (D-pad), STICK_UP/DOWN/LEFT/RIGHT and C_UP/DOWN/LEFT/RIGHT
-    // (full deflection). "seconds:INPUT[:milliseconds]@STATE[:STAGE[:PROGRESS]]" presses only while the
+    // (full deflection); L and R also press their analog triggers fully. "seconds:INPUT[:milliseconds]@STATE[:STAGE[:PROGRESS]]" presses only while the
     // game is in that TApplication state, stage and title/file-select TCardLoad progress. SMS_PRESS_UNTIL="STATE[:STAGE]>..." ends the script once the game has
     // passed through those TApplication states (9 file select, 5 gameplay) and stages in order,
-    // and a final "+SECONDS" later; state changes are logged as "game state:" lines.
+    // and a final "+SECONDS" later, keeping only the presses gated on a stage; state changes are
+    // logged as "game state:" lines.
     Controller() {
         for (const char* p = std::getenv("SMS_PRESS_UNTIL"); p && *p;) {
             char* end = nullptr;
@@ -309,9 +310,11 @@ public:
                     ++matched_ == until_.size())
                     end_at_ = now + tail_ms_;
             }
-            if (end_at_ && now >= end_at_ && !script_.empty()) {
+            if (end_at_ && now >= end_at_ && !ended_) {
+                ended_ = true;
                 std::printf("controller: press script ended at %u ms\n", now);
-                script_.clear();
+                script_.erase(std::remove_if(script_.begin(), script_.end(), [](const Press& press) { return press.stage < 0; }),
+                              script_.end());
                 if (warp_) {
                     std::printf("controller: warp to 0x%x\n", unsigned(warp_));
                     sunshine_request_warp(warp_);
@@ -325,6 +328,8 @@ public:
                 (press.progress < 0 || int(game_state_ >> 24) - 1 == press.progress)) {
                 state.connected = true;
                 state.buttons |= press.buttons;
+                if (press.buttons & 0x0040) state.trigger_left = 0xff;
+                if (press.buttons & 0x0020) state.trigger_right = 0xff;
                 if (press.stick_x || press.stick_y) {
                     state.stick_x = press.stick_x;
                     state.stick_y = press.stick_y;
@@ -455,6 +460,7 @@ private:
         int state, stage, progress;
     };
     std::vector<Press> script_;
+    bool ended_ = false;
     Uint32 start_ = 0;
 };
 
