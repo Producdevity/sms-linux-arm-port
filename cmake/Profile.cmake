@@ -1,0 +1,30 @@
+# Profile-guided optimization, opt-in. SMS_PROFILE_GENERATE builds an instrumented binary whose
+# exit paths write the profile (src/application/host_app.cpp); SMS_PROFILE_USE builds with a merged
+# profile. Both leave the toolchain's flags intact and need Clang.
+set(SMS_PROFILE_GENERATE OFF CACHE BOOL "Build an instrumented binary that writes a Clang profile at exit")
+set(SMS_PROFILE_RUNTIME "" CACHE FILEPATH "Clang profile runtime for the target (libclang_rt.profile-aarch64.a), linked into the instrumented binary")
+set(SMS_PROFILE_USE "" CACHE FILEPATH "Merged .profdata from instrumented runs of these sources")
+if(SMS_PROFILE_GENERATE AND SMS_PROFILE_USE)
+    message(FATAL_ERROR "SMS_PROFILE_GENERATE and SMS_PROFILE_USE are exclusive")
+endif()
+if(SMS_PROFILE_GENERATE OR SMS_PROFILE_USE)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR "Profile-guided optimization needs Clang")
+    endif()
+endif()
+if(SMS_PROFILE_GENERATE)
+    if(NOT EXISTS "${SMS_PROFILE_RUNTIME}")
+        message(FATAL_ERROR "Set SMS_PROFILE_RUNTIME to the target's libclang_rt.profile-aarch64.a")
+    endif()
+    add_compile_options(-fprofile-generate)
+    # The instrumented objects do not reference the runtime's start-up registration themselves.
+    add_link_options(-Wl,-u,__llvm_profile_runtime "${SMS_PROFILE_RUNTIME}")
+endif()
+if(SMS_PROFILE_USE)
+    if(NOT EXISTS "${SMS_PROFILE_USE}")
+        message(FATAL_ERROR "SMS_PROFILE_USE does not exist: ${SMS_PROFILE_USE}")
+    endif()
+    # Code the profile never reached is optimized as without it.
+    add_compile_options("-fprofile-use=${SMS_PROFILE_USE}" -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${SMS_PROFILE_USE}")
+endif()

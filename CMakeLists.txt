@@ -34,6 +34,6 @@ endif()
 # patch series relies on.
 set(SMS_PC_PORT "${CMAKE_SOURCE_DIR}/third_party/sms-pc-port")
 
-foreach(module Setup Starlet Decomp Platform Audio Application)
+foreach(module Setup Profile Starlet Decomp Platform Audio Application)
   include("${CMAKE_SOURCE_DIR}/cmake/${module}.cmake")
 endforeach()
