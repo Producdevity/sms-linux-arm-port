@@ -1,8 +1,9 @@
 #!/bin/bash
 # Builds the PortMaster port folder (the layout a ports/sunshine pull request uses)
-# and an installable sunshine.zip from an aarch64 build directory. PROGRAM_LIST, a
-# program list recorded on devices, ships as sunshine/programs.list so the game builds
-# those shaders in the background before they are first drawn.
+# and an installable sunshine.zip from an aarch64 build directory. The committed
+# packaging/ports/sunshine/sunshine/programs.list ships as sunshine/programs.list so the
+# game builds those shaders in the background before they are first drawn; PROGRAM_LIST
+# replaces it with another list.
 # Usage: [PROGRAM_LIST=FILE] tools/package-portmaster.sh BUILD_DIR OUTPUT_DIR
 set -euo pipefail
 

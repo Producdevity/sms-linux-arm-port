@@ -51,6 +51,15 @@ on `PATH` (Homebrew's LLVM on a Mac), set `LLVM_BIN` to its directory before con
 `-DSMS_STARLET_DIR=DIR` builds against another Starlet checkout, and `-DSMS_DECOMP_DIR=DIR`
 against a decompilation working tree instead of the pinned one.
 
+### Profile-guided optimization
+
+Build an instrumented binary with `-DSMS_PROFILE_GENERATE=ON
+-DSMS_PROFILE_RUNTIME=.../libclang_rt.profile-aarch64.a`, run it on a device with
+`LLVM_PROFILE_FILE=/tmp/NAME.profraw`, merge the `.profraw` files with `llvm-profdata merge -o
+FILE.profdata`, then build the release with `-DSMS_PROFILE_USE=FILE.profdata`. The instrumented
+binary writes its profile from its exit paths (`SMS_RUN_SECONDS` or a frontend quit). The
+profile stays out of the repository; a profile from other sources only matches loosely.
+
 ## Package
 
 The packager needs `screenshot.jpg` and `cover.jpg` (640x480) in `packaging/ports/sunshine`.
@@ -60,8 +69,9 @@ They are device captures and stay out of the repository.
 tools/package-portmaster.sh build/aarch64 dist
 ```
 
-It writes the port folder `dist/sunshine` and `dist/sunshine.zip`. Set
-`PROGRAM_LIST=FILE` to ship a recorded Starlet program list. Builds configured with
+It writes the port folder `dist/sunshine` and `dist/sunshine.zip`. The package ships
+`packaging/ports/sunshine/sunshine/programs.list`, the merged Starlet program lists recorded on devices; set
+`PROGRAM_LIST=FILE` to ship another one. Builds configured with
 `-DSMS_DEV_TOOLS=ON` are refused.
 
 `tools/assets/GMSE01-gamedata.sha1` lists the SHA-1 of every file `sunshine-setup` extracts. The
