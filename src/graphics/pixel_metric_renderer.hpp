@@ -1,10 +1,11 @@
 // GXReadPixMetric for Super Mario Sunshine's goop counters (PollutionCount.cpp). The game clears the
 // counter, draws, and reads it in the callback of the draw-sync token that follows. This renderer
 // sits in front of Starlet's on the GPU thread: it counts the draws between the clear and the token
-// with the CPU model of pixel_metric.hpp, reading the goop textures from CPU copies it keeps of
-// them. Those textures are EFB copies that Starlet keeps on the GPU, so it refreshes the copies
-// from EFB snapshots read back without waiting, one texture at a time on a worker thread. The
-// counts therefore trail the game's goop by a few frames; nothing waits for the GPU.
+// with the CPU model of pixel_metric.hpp and publishes the count under that token before its
+// interrupt is raised; the callback reads it. The goop textures are EFB copies that Starlet keeps
+// on the GPU, so the model reads CPU copies of them, which this renderer refreshes from EFB
+// snapshots read back without waiting, one texture at a time on a worker thread. The counts
+// therefore trail the game's goop by a few frames; nothing waits for the GPU.
 #pragma once
 
 #include "starlet/gx_fifo/renderer.hpp"
@@ -56,10 +57,9 @@ private:
 
 // Guest side, called from src/graphics/gx_misc.c.
 extern "C" {
-// GXClearPixMetric: the BP word to write (0x57, the pixel counter clear, carrying a sequence number).
+// GXClearPixMetric: the BP word to write (0x57, the pixel counter clear, carrying a sequence
+// number). The first call also wraps the game's draw-sync callback.
 unsigned sunshine_pixel_metric_clear(void);
-// GXSetDrawSync, before the token is written.
-void sunshine_pixel_metric_draw_sync(unsigned short token);
-// GXReadPixMetric's clr_pixels_in.
+// GXReadPixMetric's clr_pixels_in, in a draw-sync callback: the interval its token ended.
 unsigned sunshine_pixel_metric_read(void);
 }

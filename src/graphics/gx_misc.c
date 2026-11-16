@@ -7,7 +7,6 @@
 #include "__gx.h"
 
 unsigned sunshine_pixel_metric_clear(void);
-void sunshine_pixel_metric_draw_sync(unsigned short token);
 unsigned sunshine_pixel_metric_read(void);
 
 /* starlet::gx_fifo's GpuSetup::flush_dirty_state: GXFlush's work on the game's own GX state. */
@@ -42,7 +41,6 @@ void GXSetDrawSync(u16 token)
 	BOOL enabled;
 	u32 reg;
 
-	sunshine_pixel_metric_draw_sync(token);
 	enabled = OSDisableInterrupts();
 	reg     = token | 0x48000000;
 	GX_WRITE_BP_REG(reg);

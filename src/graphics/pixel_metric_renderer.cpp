@@ -4,6 +4,8 @@
 #include "starlet/gx/vertex.hpp"
 #include "starlet/os/game_memory.hpp"
 #include "starlet/os/thread_name.hpp"
+#include "starlet/sdk/gx.h"
+#include "starlet/sdk/os.h"
 
 #include <algorithm>
 #include <array>
@@ -31,23 +33,22 @@ using Clock = std::chrono::steady_clock;
 constexpr unsigned first_counter_token = 0x7e, last_counter_token = 0xa5;
 
 struct IntervalResult {
-    std::uint32_t seq = 0;
     std::uint64_t quads = 0, triangles = 0;
     const char* unsupported = nullptr;
 };
 
-struct Pending {
-    std::uint32_t seq;
-    Clock::time_point when;
-};
-
-// Shared by the guest threads (clear, token, read) and the GPU thread (results).
+// Shared by the GPU thread, which publishes each counted interval under the token that ends it,
+// and the guest's draw-sync interrupt, which takes it for that token's callback. Each token the
+// GPU thread passes raises one interrupt, after its interval is published, so the two pair up.
 struct Shared {
-    std::mutex mutex;
+    std::mutex mutex;  // by_token
+    std::array<std::deque<IntervalResult>, last_counter_token - first_counter_token + 1> by_token;
+    // Guest side: the sequence for the next clear, and the draw-sync callback running now (on
+    // the interrupt thread, with the token's interval when it ended one).
     std::uint32_t next_seq = 1;
-    std::uint32_t open_seq = 0;
-    std::deque<Pending> pending;
-    std::array<IntervalResult, 256> results{};
+    bool delivering = false, delivered = false;
+    IntervalResult current;
+    std::atomic<starlet::sdk::GXDrawSyncCallback> game_callback{nullptr};
 };
 
 Shared& shared() {
@@ -90,6 +91,9 @@ struct PixelMetricRenderer::Impl final : MetricTextures {
     std::uint32_t seq = 0;
     bool open = false;
     IntervalResult interval;
+    // The decoder's state, as the last draw saw it, and its token register when the interval opened.
+    const starlet::gx::State* state = nullptr;
+    std::uint32_t open_token_word = 0;
     std::unordered_map<std::uint32_t, Shadow> shadows;
     std::unordered_map<std::uint64_t, std::uint64_t> cached_quads;
     MetricTables tables;
@@ -179,14 +183,16 @@ struct PixelMetricRenderer::Impl final : MetricTextures {
         return &it->second.metric;
     }
 
-    void close_interval() {
-        if (!open) return;
+    // A token ended the open interval: publish it under that token for its callback.
+    void close_interval(std::uint16_t token) {
         open = false;
         ++intervals;
+        if (token < first_counter_token || token > last_counter_token) return;
         Shared& sh = shared();
         std::lock_guard<std::mutex> lock(sh.mutex);
-        interval.seq = seq;
-        sh.results[seq & 255] = interval;
+        auto& queue = sh.by_token[token - first_counter_token];
+        if (queue.size() >= 8) queue.pop_front();  // its interrupts stopped (none observed)
+        queue.push_back(interval);
     }
 
     void count(const starlet::gx::State& state, const starlet::gx::Draw& draw, starlet::gx::MemoryReader& memory) {
@@ -418,12 +424,14 @@ void PixelMetricRenderer::draw(const starlet::gx::State& state, const starlet::g
                                starlet::gx::MemoryReader& memory) {
     Impl& g = *impl_;
     g.service();
+    g.state = &state;
     const std::uint32_t seq = state.bp(0x57) & 0xffffff;
     if (seq != 0 && seq != g.seq) {
-        g.close_interval();
+        // A new clear: the interval before it, if no token ended it, is never read.
         g.seq = seq;
         g.open = true;
         g.interval = {};
+        g.open_token_word = state.bp(0x48);
     }
     if (g.open) {
         const auto start = Clock::now();
@@ -439,9 +447,12 @@ void PixelMetricRenderer::draw(const starlet::gx::State& state, const starlet::g
 }
 
 void PixelMetricRenderer::wait_until_idle() {
-    // Draw-done and tokens: the counter's reading point.
-    impl_->close_interval();
-    impl_->service();
+    // Draw-done and tokens. The decoder has applied the token's BP write already; a draw-done
+    // leaves the token register as it was and the interval open.
+    Impl& g = *impl_;
+    if (g.open && g.state && g.state->bp(0x48) != g.open_token_word)
+        g.close_interval(std::uint16_t(g.state->bp(0x48) & 0xffff));
+    g.service();
     inner_.wait_until_idle();
 }
 
@@ -498,48 +509,53 @@ void PixelMetricRenderer::print_stats(const starlet::gx_fifo::GpuCounters& gpu) 
 
 }
 
-using sms::graphics::IntervalResult;
+namespace {
+
+// Wraps the game's draw-sync callback (registered once, at TApplication::initialize) so that
+// GXReadPixMetric knows which token's callback is running.
+void metric_draw_sync(std::uint16_t token) {
+    auto& sh = sms::graphics::shared();
+    sh.delivering = true;
+    sh.delivered = false;
+    if (token >= sms::graphics::first_counter_token && token <= sms::graphics::last_counter_token) {
+        std::lock_guard<std::mutex> lock(sh.mutex);
+        auto& queue = sh.by_token[token - sms::graphics::first_counter_token];
+        if (!queue.empty()) {
+            sh.current = queue.front();
+            queue.pop_front();
+            sh.delivered = true;
+        }
+    }
+    if (const auto game = sh.game_callback.load(std::memory_order_acquire)) game(token);
+    sh.delivering = false;
+}
+
+}  // namespace
 
 extern "C" unsigned sunshine_pixel_metric_clear(void) {
     auto& sh = sms::graphics::shared();
-    std::lock_guard<std::mutex> lock(sh.mutex);
+    if (!sh.game_callback.load(std::memory_order_acquire)) {
+        // No draw-sync interrupt runs between taking the game's callback and storing it.
+        const starlet::sdk::BOOL enabled = OSDisableInterrupts();
+        const starlet::sdk::GXDrawSyncCallback game = GXSetDrawSyncCallback(metric_draw_sync);
+        if (game && game != metric_draw_sync) sh.game_callback.store(game, std::memory_order_release);
+        else GXSetDrawSyncCallback(game);
+        OSRestoreInterrupts(enabled);
+    }
     const std::uint32_t seq = sh.next_seq;
     sh.next_seq = (sh.next_seq + 1) & 0xffffff;
     if (sh.next_seq == 0) sh.next_seq = 1;
-    sh.open_seq = seq;
     return 0x57000000u | seq;
-}
-
-extern "C" void sunshine_pixel_metric_draw_sync(unsigned short token) {
-    auto& sh = sms::graphics::shared();
-    std::lock_guard<std::mutex> lock(sh.mutex);
-    if (!sh.open_seq) return;
-    if (token >= sms::graphics::first_counter_token && token <= sms::graphics::last_counter_token)
-        sh.pending.push_back({sh.open_seq, sms::graphics::Clock::now()});
-    sh.open_seq = 0;
 }
 
 extern "C" unsigned sunshine_pixel_metric_read(void) {
     auto& sh = sms::graphics::shared();
-    IntervalResult result;
-    {
-        std::lock_guard<std::mutex> lock(sh.mutex);
-        // A counter token whose callback never ran (the director dropped its callbacks at a stage
-        // exit) leaves its interval behind; callbacks follow their tokens within a frame.
-        const auto now = sms::graphics::Clock::now();
-        while (!sh.pending.empty() && now - sh.pending.front().when > std::chrono::seconds(1)) {
-            sh.pending.pop_front();
-            sms::graphics::note_once("dropped a counted interval whose callback did not run");
-        }
-        if (sh.pending.empty()) {
-            sms::graphics::note_once("GXReadPixMetric without a counted interval; reads 0");
-            return 0;
-        }
-        const std::uint32_t seq = sh.pending.front().seq;
-        sh.pending.pop_front();
-        const IntervalResult& stored = sh.results[seq & 255];
-        if (stored.seq == seq) result = stored;  // otherwise nothing was drawn
+    if (!sh.delivering) {
+        sms::graphics::note_once("GXReadPixMetric outside a draw-sync callback; reads 0");
+        return 0;
     }
+    sms::graphics::IntervalResult result;
+    if (sh.delivered) result = sh.current;  // otherwise the interval drew nothing
     if (result.unsupported) {
         sms::graphics::note_once(result.unsupported);
         return 0xffffffffu;
