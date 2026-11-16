@@ -2,6 +2,7 @@
 // the GPU thread, controller sampling on this thread, and the game's main() on
 // the guest CPU.
 #include "application/host_app.hpp"
+#include "graphics/pixel_metric_renderer.hpp"
 #include "platform/memory.hpp"
 #include "platform/sdk_layout.hpp"
 
@@ -646,6 +647,30 @@ private:
     std::vector<Thread> previous_;
 };
 
+// Development: SMS_GOOP_LOG prints, every 2 s (SMS_GOOP_LOG=N: every N s), the goop counters as the
+// game reads them (src/compat/game_state.cpp) when they changed.
+extern "C" unsigned sunshine_goop_state(char* out, unsigned size);
+class GoopLog {
+public:
+    void sample() {
+        if (!enabled_) return;
+        const Uint32 now = SDL_GetTicks();
+        if (now - last_ < period_ms_) return;
+        last_ = now;
+        char line[512];
+        if (!sunshine_goop_state(line, sizeof line) || previous_ == line) return;
+        previous_ = line;
+        std::printf("goop: %u ms %s\n", now, line);
+        std::fflush(stdout);
+    }
+
+private:
+    bool enabled_ = std::getenv("SMS_GOOP_LOG") != nullptr;
+    Uint32 period_ms_ = enabled_ && std::atoi(std::getenv("SMS_GOOP_LOG")) > 0 ? Uint32(std::atoi(std::getenv("SMS_GOOP_LOG"))) * 1000 : 2000;
+    Uint32 last_ = 0;
+    std::string previous_;
+};
+
 // Earlier releases kept slot A in <saves>/card_a with a card_state.txt; it becomes Dolphin's
 // folder for the USA disc, where starlet::card keeps it.
 void adopt_old_card(const std::string& saves) {
@@ -863,8 +888,10 @@ int run_checked(int argc, char** argv, int (*guest_main)()) {
     SDL_GL_MakeCurrent(display.window, nullptr);
 
     static starlet::gx_fifo::GlesBackend backend(renderer);
+    // GXReadPixMetric for the goop counters, counted in front of the GLES backend.
+    static sms::graphics::PixelMetricRenderer metric(backend);
     starlet::gx_fifo::GpuSetup gpu;
-    gpu.renderer = &backend;
+    gpu.renderer = &metric;
     gpu.efb = limits.efb;
     gpu.flush_dirty_state = sunshine_gx_flush_dirty_state;
     // sms-pc-port's converters leave the vertex data the game loads in host order (src/graphics).
@@ -910,6 +937,7 @@ int run_checked(int argc, char** argv, int (*guest_main)()) {
     start_profiler();
     AudioStats audio_stats;
     PerfStats perf_stats;
+    GoopLog goop_log;
     Controller controller;
     controller.sample();
     std::atomic<bool> game_returned{false};
@@ -951,6 +979,7 @@ int run_checked(int argc, char** argv, int (*guest_main)()) {
         overlay::save_when_closed();
         audio_stats.sample();
         perf_stats.sample();
+        goop_log.sample();
         SDL_Delay(4);
     }
     std::printf("The game's main() returned\n");

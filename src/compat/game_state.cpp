@@ -46,3 +46,48 @@ extern "C" void sunshine_pad_read_hook()
 	__atomic_store_n(&warp_code, 0, __ATOMIC_RELAXED);
 	gpMarDirector->setNextStage(code, nullptr);
 }
+
+#include <Map/MapEventSink.hpp>
+#include <Map/PollutionManager.hpp>
+#include <stdio.h>
+
+// Development: the goop counters as the game reads them (TPollutionManager::getPollutionDegree,
+// each layer's and each counted object's counter), written to out; 0 without a goop manager.
+// Wrapped counters print negative. Game objects are 4-byte aligned; the reads are 32-bit.
+static bool goop_readable(const void* p, unsigned long size)
+{
+	const unsigned long a = (unsigned long)p;
+	return a >= 0x80000000ul && a + size <= 0x84000000ul && a % 4 == 0;
+}
+
+extern "C" unsigned sunshine_goop_state(char* out, unsigned size)
+{
+	TPollutionManager* pollution = __atomic_load_n(&gpPollution, __ATOMIC_RELAXED);
+	if (!size || !goop_readable(pollution, sizeof(TPollutionManager)))
+		return 0;
+	const int layers = pollution->getJointModelNum();
+	if (layers < 0 || layers > 20)
+		return 0;
+	unsigned total = 0;
+	int n = snprintf(out, size, "layers");
+	for (int i = 0; i < layers && n < (int)size; ++i) {
+		TPollutionLayer* layer = pollution->getLayer(i);
+		if (!goop_readable(layer, sizeof(TPollutionLayer)))
+			return 0;
+		total += layer->mCounter;
+		n += snprintf(out + n, size - n, " %d", (int)layer->mCounter);
+	}
+	const TPollutionCounterObj& objects = pollution->getCounterObj();
+	if (n < (int)size && objects.mCounterNum > 0 && objects.mCounterNum <= 30
+	    && goop_readable(objects.mCounters, objects.mCounterNum * sizeof(u32*))) {
+		n += snprintf(out + n, size - n, " objects");
+		for (int i = 0; i < objects.mCounterNum && n < (int)size; ++i) {
+			const u32* counter = objects.mCounters[i];
+			if (goop_readable(counter, sizeof(u32)))
+				n += snprintf(out + n, size - n, " %d", (int)*counter);
+		}
+	}
+	if (n < (int)size)
+		n += snprintf(out + n, size - n, " total %d cleaned-below %u", (int)total, TMapEventSink::mCleanedDegree);
+	return n < (int)size ? (unsigned)n : size - 1;
+}
