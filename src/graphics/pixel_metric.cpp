@@ -687,6 +687,7 @@ void MetricDraw::count(const MetricVertex* vertices, std::size_t vertex_count, c
             }
             return alpha_test(tev.alpha_test, tev_alpha(tev, values.data()));
         };
+        const bool fast = pl.single && lookup_count == 1 && affine;
         // Row spans of the coverage test above: E(x) = A - B * x > 0 for each edge, with
         // A = C + DX * (y << 4) and B = DY << 4. Pixels that pass mark their 2x2 quad.
         const auto floor_div = [](std::int64_t a, std::int64_t b) { return a >= 0 ? a / b : -((-a + b - 1) / b); };
@@ -707,9 +708,29 @@ void MetricDraw::count(const MetricVertex* vertices, std::size_t vertex_count, c
                         xs = std::max(xs, floor_div(-A, -B) + 1);
                     }
                 }
-                for (std::int64_t x = xs; x < xe; ++x) {
-                    std::uint8_t& mark = quad_marks[std::size_t((int(x) >> 1) - first_quad)];
-                    if (!mark && passes(int(x), y)) mark = 1, any = true;
+                if (fast) {
+                    // One lookup through a plane with w = q = 1: per pixel two multiply-adds, the
+                    // texel and the table (the goop counters' draws).
+                    const Lookup& lk = lookups[0];
+                    const Slope& ss = tex_slope[0][0];
+                    const Slope& st = tex_slope[0][1];
+                    const float s_row = ss.f0 + ss.dfdy * (float(y) + 0.495f - ss.y0) + ss.dfdx * (0.495f - ss.x0);
+                    const float t_row = st.f0 + st.dfdy * (float(y) + 0.495f - st.y0) + st.dfdx * (0.495f - st.x0);
+                    const std::uint8_t* texels = lk.texture->texels;
+                    for (std::int64_t x = xs; x < xe; ++x) {
+                        std::uint8_t& mark = quad_marks[std::size_t((int(x) >> 1) - first_quad)];
+                        if (mark) continue;
+                        const float s = std::clamp((s_row + ss.dfdx * float(x)) * 128.0f, -2.0e9f, 2.0e9f);
+                        const float t = std::clamp((t_row + st.dfdx * float(x)) * 128.0f, -2.0e9f, 2.0e9f);
+                        const int tx = wrap(int(s) >> 7, lk.wrap_s, lk.width), ty = wrap(int(t) >> 7, lk.wrap_t, lk.height);
+                        if (pl.pass_by_texel[texels[std::size_t(ty) * std::size_t(lk.width) + std::size_t(tx)]])
+                            mark = 1, any = true;
+                    }
+                } else {
+                    for (std::int64_t x = xs; x < xe; ++x) {
+                        std::uint8_t& mark = quad_marks[std::size_t((int(x) >> 1) - first_quad)];
+                        if (!mark && passes(int(x), y)) mark = 1, any = true;
+                    }
                 }
             }
             if (!any) continue;

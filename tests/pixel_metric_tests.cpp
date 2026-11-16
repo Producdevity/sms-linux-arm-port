@@ -380,6 +380,35 @@ void test_random_triangles_match_reference() {
     EXPECT_EQ(c.quads, reference_quads(s.texels, size, reinterpret_cast<const float(*)[2]>(xy.data()), triangles));
 }
 
+void test_two_lookups_match_one() {
+    // Two stages reading the texture through two identical coordinates take the general
+    // per-pixel path; the count equals the one-lookup path's.
+    Setup one(16, 16);
+    layer_tev(one, 0, 50, 10);
+    for (int i = 0; i < 16; ++i) one.texel(i, 15 - i, 20 + 13 * i);
+    const MetricCount a = count_quad(one, 16, 16);
+    Setup two = one;
+    two.bp[0x00] = 2 | 1u << 10;                 // two texgens, two stages
+    two.bp[0x28] = 1u << 6 | 1u << 15 | 1u << 18;  // stage 1 reads TEXCOORD1
+    two.xf[0x1041] = 6u << 7;                    // TEXCOORD1 from TEX1
+    two.bp[0x32] = 15;
+    two.bp[0x33] = 15;
+    const MetricVertex v[4] = {vertex(0, 0, 0, 0), vertex(16, 0, 1, 0), vertex(16, 16, 1, 1), vertex(0, 16, 0, 1)};
+    MetricVertex w[4];
+    for (int i = 0; i < 4; ++i) {
+        w[i] = v[i];
+        w[i].texcoords[1] = v[i].texcoords[0];
+    }
+    const std::uint16_t indices[6] = {0, 1, 2, 0, 2, 3};
+    MetricRegisters r{two.bp.data(), two.tev, two.xf.data()};
+    Textures textures(two);
+    MetricCount b;
+    count_triangles(r, w, 4, indices, 6, textures, b);
+    EXPECT_EQ(b.unsupported == nullptr, true);
+    EXPECT_EQ(b.quads, a.quads);
+    EXPECT_EQ(a.quads > 0, true);
+}
+
 }  // namespace
 
 int main() {
@@ -398,6 +427,7 @@ int main() {
     test_primitive_triangles();
     test_cache_key();
     test_random_triangles_match_reference();
+    test_two_lookups_match_one();
     if (failures) {
         std::printf("%d failure(s)\n", failures);
         return 1;
