@@ -88,6 +88,31 @@ extern "C" unsigned sunshine_goop_state(char* out, unsigned size)
 		}
 	}
 	if (n < (int)size)
-		n += snprintf(out + n, size - n, " total %d cleaned-below %u", (int)total, TMapEventSink::mCleanedDegree);
+		n += snprintf(out + n, size - n, " total %d cleaned-below %u cleaned-all %d", (int)total, TMapEventSink::mCleanedDegree,
+		              pollution->cleanedAll() ? 1 : 0);
+	// The goop maps the CPU reads (isPolluted, getPollutedPosNear, cleaned): per layer, texels above
+	// its polluted threshold, those of them in rows 448 and below, and a byte sum. The maps are
+	// I8 tiles of 8x4 texels, so rows 448 and below are the bytes from 448 * width on.
+	if (n < (int)size)
+		n += snprintf(out + n, size - n, " maps");
+	for (int i = 0; i < layers && n < (int)size; ++i) {
+		const TPollutionLayer* layer = pollution->getLayer(i);
+		const int w = layer->mPos.getWidth(), h = layer->mPos.getHeight();
+		const u8* map = layer->mPollutionMap;
+		if (w <= 0 || h <= 0 || w > 1024 || h > 1024 || !goop_readable(map, (unsigned long)w * h))
+			continue;
+		unsigned polluted = 0, low = 0, sum = 0;
+		const unsigned long tail = h > 448 ? 448ul * w : (unsigned long)w * h;
+		for (unsigned long b = 0; b < (unsigned long)w * h; ++b) {
+			const unsigned v = map[b];
+			sum += v;
+			if (v > layer->mPollutedThreshold) {
+				++polluted;
+				if (b >= tail)
+					++low;
+			}
+		}
+		n += snprintf(out + n, size - n, " %u/%u/%u", polluted, low, sum);
+	}
 	return n < (int)size ? (unsigned)n : size - 1;
 }

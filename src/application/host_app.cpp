@@ -657,7 +657,7 @@ public:
         const Uint32 now = SDL_GetTicks();
         if (now - last_ < period_ms_) return;
         last_ = now;
-        char line[512];
+        char line[1024];
         if (!sunshine_goop_state(line, sizeof line) || previous_ == line) return;
         previous_ = line;
         std::printf("goop: %u ms %s\n", now, line);
