@@ -51,6 +51,12 @@ on `PATH` (Homebrew's LLVM on a Mac), set `LLVM_BIN` to its directory before con
 `-DSMS_STARLET_DIR=DIR` builds against another Starlet checkout, and `-DSMS_DECOMP_DIR=DIR`
 against a decompilation working tree instead of the pinned one.
 
+Host tests of the port's own code (Clang or GCC on the build machine):
+
+```sh
+cmake -S tests -B build/host-tests && cmake --build build/host-tests && ctest --test-dir build/host-tests
+```
+
 ### Profile-guided optimization
 
 Build an instrumented binary with `-DSMS_PROFILE_GENERATE=ON

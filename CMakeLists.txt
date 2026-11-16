@@ -37,3 +37,7 @@ set(SMS_PC_PORT "${CMAKE_SOURCE_DIR}/third_party/sms-pc-port")
 foreach(module Setup Profile Starlet Decomp Platform Audio Application)
   include("${CMAKE_SOURCE_DIR}/cmake/${module}.cmake")
 endforeach()
+
+if(BUILD_TESTING)
+  add_subdirectory(tests)
+endif()
