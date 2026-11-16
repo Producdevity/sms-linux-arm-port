@@ -38,8 +38,11 @@ extern "C" void sunshine_request_warp(int code)
 	__atomic_store_n(&warp_code, code, __ATOMIC_RELEASE);
 }
 
+static void goop_clean_sweep();
+
 extern "C" void sunshine_pad_read_hook()
 {
+	goop_clean_sweep();
 	const int code = __atomic_load_n(&warp_code, __ATOMIC_ACQUIRE);
 	if (!code || gpApplication.mAppState != TApplication::APP_STATE_GAMEPLAY || !gpMarDirector)
 		return;
@@ -50,6 +53,70 @@ extern "C" void sunshine_pad_read_hook()
 #include <Map/MapEventSink.hpp>
 #include <Map/PollutionManager.hpp>
 #include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+// Development: SMS_GOOP_CLEAN=SECONDS cleans the goop of every ground layer through the game's
+// own cleaning call, TPollutionManager::clean (FLUDD's water calls it), starting SECONDS after a
+// stage with goop is set up: 64 stamps of 16 texels per frame, at the height each layer's height
+// map gives, row after row; three passes 6 texels apart, then passes over each texel the goop map
+// still holds goop at (slopes the coarse passes miss). On the game thread (PADRead).
+static void goop_clean_sweep()
+{
+	static const char* setting = getenv("SMS_GOOP_CLEAN");
+	if (!setting)
+		return;
+	static TPollutionManager* seen;
+	static double started;
+	static int layer, s, t;
+	static unsigned passes;
+	TPollutionManager* pollution = gpPollution;
+	if (!pollution || pollution->getJointModelNum() <= 0
+	    || gpApplication.mAppState != TApplication::APP_STATE_GAMEPLAY)
+		return;
+	timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	const double seconds = now.tv_sec + now.tv_nsec * 1e-9;
+	if (pollution != seen) {
+		seen    = pollution;
+		started = seconds;
+		layer = s = t = 0;
+		passes        = 0;
+	}
+	if (seconds - started < atof(setting))
+		return;
+	const int size = 16;
+	// Bounded: a stage without ground layers or with prohibited rows stamps less.
+	for (int stamps = 0, visited = 0; stamps < 64 && visited < 65536; ++visited) {
+		if (layer >= pollution->getJointModelNum()) {
+			layer = 0;
+			if (++passes == 1 || passes % 10 == 0)
+				printf("goop: clean sweep %u done\n", passes);
+		}
+		TPollutionLayer* l = pollution->getLayer(layer);
+		TPollutionPos& pos = l->getPos();
+		if (l->getPlaneType() != 0 || t >= pos.getHeight()) {
+			++layer;
+			s = t = 0;
+			continue;
+		}
+		// The stamp's height is worldToDepth(y) (40 world units a step): the middle of the
+		// texel's step, so the stamp's height test passes there.
+		const bool coarse = passes < 3;
+		const int step  = coarse ? 6 : 1;
+		const int depth = pos.getDepth(s, t);
+		if (depth < 0xff && (coarse || l->mPollutionMap[pos.index(s, t)] != 0)) {
+			const f32 y = pos.mVerticalOffset + (depth + 0.5f) * 40.0f;
+			pollution->clean(l->getWorldPosX(s), y, l->getWorldPosZ(t), pos.texToWorldSize(size));
+			++stamps;
+		}
+		s += step;
+		if (s >= pos.getWidth()) {
+			s = 0;
+			t += step;
+		}
+	}
+}
 
 // Development: the goop counters as the game reads them (TPollutionManager::getPollutionDegree,
 // each layer's and each counted object's counter), written to out; 0 without a goop manager.

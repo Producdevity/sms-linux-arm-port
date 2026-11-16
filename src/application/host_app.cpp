@@ -295,6 +295,8 @@ public:
             if (const char* every = std::getenv("SMS_WARP_EVERY")) warp_every_ms_ = Uint32(std::atof(every) * 1000);
             starlet::pad::set_read_hook(sunshine_pad_read_hook);
         }
+        // SMS_GOOP_CLEAN (src/compat/game_state.cpp) runs from the same hook.
+        if (std::getenv("SMS_GOOP_CLEAN")) starlet::pad::set_read_hook(sunshine_pad_read_hook);
         if (std::getenv("SMS_PAD_TRACE"))
             std::printf("controller: %zu scripted presses\n", script_.size());
         attach_virtual_pad();
