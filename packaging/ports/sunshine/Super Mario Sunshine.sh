@@ -38,6 +38,13 @@ if [ ! -f gamedata/.prepared ]; then
   fi
 fi
 
+# AmberELEC's GO-Super Gamepad mapping (R36S) puts Guide on the right stick button and leaves FN
+# unmapped, so the overlay menu cannot open from FN. PortMaster's own entry for the pad maps both;
+# SDL keeps the last mapping given for a controller.
+if [ "$CFW_NAME" = AmberELEC ] && grep ',GO-Super Gamepad,' <<< "$sdl_controllerconfig" | grep -qv 'rightstick:'; then
+  pm_pad=$(grep -m1 ',GO-Super Gamepad,' "$controlfolder/gamecontrollerdb.txt")
+  [ -n "$pm_pad" ] && sdl_controllerconfig="$sdl_controllerconfig"$'\n'"$pm_pad"
+fi
 export SDL_GAMECONTROLLERCONFIG="$sdl_controllerconfig"
 $ESUDO chmod +x "$GAMEDIR/sunshine.${DEVICE_ARCH}"
 mkdir -p saves shadercache
