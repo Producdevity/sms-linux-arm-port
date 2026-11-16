@@ -1,6 +1,7 @@
 // Host tests of the blend-input counter model against hand-computed counts.
 #include "graphics/pixel_metric.hpp"
 
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -380,6 +381,23 @@ void test_random_triangles_match_reference() {
     EXPECT_EQ(c.quads, reference_quads(s.texels, size, reinterpret_cast<const float(*)[2]>(xy.data()), triangles));
 }
 
+// A 512 x 512 layer drawn 1:1 (Sirena's goop map): every row samples inside the texture.
+void test_large_layer_matches_reference() {
+    const int size = 512;
+    Setup s(size, size);
+    std::uint32_t seed = 777;
+    const auto next = [&seed] { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
+    for (auto& t : s.texels) t = (next() % 6 == 0) ? std::uint8_t(1 + next() % 255) : 0;
+    const float w = float(size);
+    const float xy[6][2] = {{0, 0}, {w, 0}, {w, w}, {0, 0}, {w, w}, {0, w}};
+    const auto start = std::chrono::steady_clock::now();
+    const MetricCount c = count_quad(s, w, w);
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    std::printf("512x512 layer counted in %.2f ms\n", ms);
+    EXPECT_EQ(c.unsupported == nullptr, true);
+    EXPECT_EQ(c.quads, reference_quads(s.texels, size, xy, 2));
+}
+
 void test_two_lookups_match_one() {
     // Two stages reading the texture through two identical coordinates take the general
     // per-pixel path; the count equals the one-lookup path's.
@@ -427,6 +445,7 @@ int main() {
     test_primitive_triangles();
     test_cache_key();
     test_random_triangles_match_reference();
+    test_large_layer_matches_reference();
     test_two_lookups_match_one();
     if (failures) {
         std::printf("%d failure(s)\n", failures);

@@ -717,6 +717,26 @@ void MetricDraw::count(const MetricVertex* vertices, std::size_t vertex_count, c
                     const float s_row = ss.f0 + ss.dfdy * (float(y) + 0.495f - ss.y0) + ss.dfdx * (0.495f - ss.x0);
                     const float t_row = st.f0 + st.dfdy * (float(y) + 0.495f - st.y0) + st.dfdx * (0.495f - st.x0);
                     const std::uint8_t* texels = lk.texture->texels;
+                    // A row whose t does not change along x and whose s stays inside the texture
+                    // at both ends of the span (s is monotonic in x): every pixel samples this
+                    // texel row, and the clamp and wrap below change nothing. The same texels in
+                    // fewer operations (the layer counters' 1:1 rectangles). The 1/128 texel
+                    // margin covers a fused multiply-add rounding the loop's s differently.
+                    if (xs < xe && st.dfdx == 0.0f) {
+                        const float t = (t_row + st.dfdx * float(xs)) * 128.0f;
+                        const float s0 = (s_row + ss.dfdx * float(xs)) * 128.0f, s1 = (s_row + ss.dfdx * float(xe - 1)) * 128.0f;
+                        if (t >= 0.0f && t < float(lk.height) * 128.0f && std::min(s0, s1) >= 0.0f &&
+                            std::max(s0, s1) < float(lk.width) * 128.0f - 1.0f) {
+                            const std::uint8_t* row = texels + std::size_t(int(t) >> 7) * std::size_t(lk.width);
+                            for (std::int64_t x = xs; x < xe; ++x) {
+                                std::uint8_t& mark = quad_marks[std::size_t((int(x) >> 1) - first_quad)];
+                                if (mark) continue;
+                                const float s = (s_row + ss.dfdx * float(x)) * 128.0f;
+                                if (pl.pass_by_texel[row[int(s) >> 7]]) mark = 1, any = true;
+                            }
+                            continue;
+                        }
+                    }
                     for (std::int64_t x = xs; x < xe; ++x) {
                         std::uint8_t& mark = quad_marks[std::size_t((int(x) >> 1) - first_quad)];
                         if (mark) continue;
