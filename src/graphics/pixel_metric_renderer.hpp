@@ -3,9 +3,10 @@
 // sits in front of Starlet's on the GPU thread: it counts the draws between the clear and the token
 // with the CPU model of pixel_metric.hpp and publishes the count under that token before its
 // interrupt is raised; the callback reads it. The goop textures are EFB copies that Starlet keeps
-// on the GPU, so the model reads CPU copies of them, which this renderer refreshes from EFB
-// snapshots read back without waiting, one texture at a time on a worker thread. The counts
-// therefore trail the game's goop by a few frames; nothing waits for the GPU.
+// on the GPU; this renderer has Starlet write them back to memory as well (the game's CPU reads
+// them: TPollutionLayer::isPolluted), and the model reads CPU copies of that memory, refreshed one
+// texture at a time. The counts therefore trail the game's goop by a fraction of a second;
+// nothing waits for the GPU.
 #pragma once
 
 #include "starlet/gx_fifo/renderer.hpp"
@@ -29,6 +30,9 @@ public:
     bool resident_in(const void* data, std::size_t bytes) const override;
     void before_dma_read(const void* data, std::size_t bytes) override;
     void before_dma_write(const void* data, std::size_t bytes) override;
+    void write_back(std::uint32_t address, std::size_t bytes, bool on) override;
+    std::uint64_t write_backs_issued() const override;
+    bool land_write_backs(std::uint64_t through, bool wait) override;
     int snapshot_efb(const starlet::gx::EfbRegion& region) override;
     int snapshot_efb_exact(const starlet::gx::EfbRegion& region) override;
     bool snapshot_ready(int index) const override;

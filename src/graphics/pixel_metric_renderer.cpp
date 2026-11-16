@@ -3,7 +3,6 @@
 #include "graphics/pixel_metric.hpp"
 #include "starlet/gx/vertex.hpp"
 #include "starlet/os/game_memory.hpp"
-#include "starlet/os/thread_name.hpp"
 #include "starlet/sdk/gx.h"
 #include "starlet/sdk/os.h"
 
@@ -11,7 +10,6 @@
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -19,7 +17,6 @@
 #include <exception>
 #include <mutex>
 #include <set>
-#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -49,6 +46,8 @@ struct Shared {
     bool delivering = false, delivered = false;
     IntervalResult current;
     std::atomic<starlet::sdk::GXDrawSyncCallback> game_callback{nullptr};
+    // Development (SMS_GOOP_LOG): counted intervals a callback read.
+    std::atomic<std::uint64_t> reads{0};
 };
 
 Shared& shared() {
@@ -73,15 +72,15 @@ void note_once(const char* what) {
 
 }  // namespace
 
-// A CPU copy of an I8 texture the counted draws sample.
+// A CPU copy of an I8 texture the counted draws sample, decoded from its memory, which Starlet
+// writes each copy back to (Renderer::write_back).
 struct Shadow {
     std::uint32_t address = 0;
     int width = 0, height = 0;
     std::vector<std::uint8_t> texels;   // rows
-    std::vector<std::uint8_t> memory;   // its memory bytes when last read or copied to
+    std::vector<std::uint8_t> memory;   // its memory bytes when last read
     MetricTexture metric;
     std::uint64_t generation = 0;       // advances whenever texels change
-    std::uint64_t epoch = 0;            // advances when texels are reset from memory
     std::uint64_t used_frame = 0, checked_frame = ~0ull, refreshed_frame = 0;
 };
 
@@ -106,36 +105,8 @@ struct PixelMetricRenderer::Impl final : MetricTextures {
     double count_ms = 0;
     Clock::time_point stats_at = Clock::now();
 
-    // One refresh at a time: the GPU thread takes the snapshot, the worker reads it.
-    struct Job {
-        bool active = false, done = false, failed = false;
-        std::uint32_t address = 0;
-        std::uint64_t epoch = 0;
-        int snapshot = -1;
-        starlet::gx::EfbRegion region;
-        int channel = 0;  // 0..3: R, G, B, A; 4: luminance
-        std::vector<std::uint8_t> rows;
-        double peek_ms = 0;
-    };
-    std::mutex job_mutex;
-    std::condition_variable job_cv;
-    Job job;
-    std::atomic<bool> job_finished{false};
-    bool stopping = false;
-    double peek_ms_total = 0;
-    std::thread worker;
-
-    explicit Impl(starlet::gx_fifo::Renderer& r) : inner(r) {
-        worker = std::thread([this] { run_worker(); });
-    }
-    ~Impl() override {
-        {
-            std::lock_guard<std::mutex> lock(job_mutex);
-            stopping = true;
-        }
-        job_cv.notify_all();
-        if (worker.joinable()) worker.join();
-    }
+    explicit Impl(starlet::gx_fifo::Renderer& r) : inner(r) {}
+    ~Impl() override = default;
 
     static const std::uint8_t* native(std::uint32_t address, std::size_t size) {
         const void* p = starlet::os::physical_to_native(address);
@@ -147,12 +118,18 @@ struct PixelMetricRenderer::Impl final : MetricTextures {
         s.memory.assign(bytes, bytes + size);
         decode_i8(bytes, s.width, s.height, s.texels.data());
         ++s.generation;
-        ++s.epoch;
+        s.refreshed_frame = frame;
+    }
+    void forget(std::unordered_map<std::uint32_t, Shadow>::iterator it) {
+        inner.write_back(it->second.address, std::size_t(it->second.width) * std::size_t(it->second.height), false);
+        shadows.erase(it);
     }
 
-    // MetricTextures: the texture's CPU copy, created from memory on first use. Memory that changed
-    // since the copy was last synchronised was rewritten by the CPU (a stage reload) or materialized
-    // by Starlet; either way it is what the GPU samples next.
+    // MetricTextures: the texture's CPU copy, from memory. Its copies are written back there (the
+    // game's CPU reads them as well), so memory holds the texture the GPU samples, up to the copy
+    // whose readback is still in flight. Each refresh recounts the draws that sample it: one
+    // texture at a time, the stalest first, and texels / 16384 frames apart (16 for a 512 x 512
+    // map), so the counts trail the goop by a fraction of a second.
     const MetricTexture* texture(std::uint32_t address, int width, int height) override {
         if (width % 8 || height % 4) return nullptr;
         const std::size_t size = std::size_t(width) * std::size_t(height);
@@ -160,7 +137,7 @@ struct PixelMetricRenderer::Impl final : MetricTextures {
         if (!bytes) return nullptr;
         auto it = shadows.find(address);
         if (it != shadows.end() && (it->second.width != width || it->second.height != height)) {
-            shadows.erase(it);
+            forget(it);
             it = shadows.end();
         }
         if (it == shadows.end()) {
@@ -174,9 +151,22 @@ struct PixelMetricRenderer::Impl final : MetricTextures {
             it->second.metric.texels = it->second.texels.data();
             reset_from_memory(it->second, bytes);
             it->second.checked_frame = frame;
+            inner.write_back(address, size, true);
         } else if (it->second.checked_frame != frame) {
             it->second.checked_frame = frame;
-            if (std::memcmp(bytes, it->second.memory.data(), size) != 0) reset_from_memory(it->second, bytes);
+            Shadow& s = it->second;
+            bool stalest = true;
+            for (const auto& [a, other] : shadows)
+                if (a != address && other.used_frame + 4 >= frame && other.refreshed_frame < s.refreshed_frame) stalest = false;
+            if (frame >= next_refresh_frame && stalest) {
+                next_refresh_frame = frame + std::max<std::uint64_t>(4, size / 16384);
+                if (std::memcmp(bytes, s.memory.data(), size) != 0) {
+                    reset_from_memory(s, bytes);
+                    ++refreshes;
+                } else {
+                    s.refreshed_frame = frame;
+                }
+            }
         }
         it->second.used_frame = frame;
         it->second.metric.generation = it->second.generation;
@@ -264,150 +254,23 @@ struct PixelMetricRenderer::Impl final : MetricTextures {
         cached_quads.emplace(key, result.quads);
     }
 
-    // GPU thread: takes a finished refresh into its texture's CPU copy.
-    void service() {
-        if (!job_finished.load(std::memory_order_acquire)) return;
-        std::lock_guard<std::mutex> lock(job_mutex);
-        job_finished.store(false, std::memory_order_relaxed);
-        if (!job.active || !job.done) return;
-        if (!job.failed) {
-            const auto it = shadows.find(job.address);
-            if (it != shadows.end() && it->second.epoch == job.epoch) {
-                Shadow& s = it->second;
-                const int w = job.region.width, h = job.region.height;
-                for (int y = 0; y < h && y < s.height; ++y)
-                    std::memcpy(&s.texels[std::size_t(y) * std::size_t(s.width)], &job.rows[std::size_t(y) * std::size_t(w)],
-                                std::size_t(std::min(w, s.width)));
-                ++s.generation;
-                s.refreshed_frame = frame;
-                ++refreshes;
-                peek_ms_total += job.peek_ms;
-                next_refresh_frame = std::max(next_refresh_frame, frame + std::uint64_t(job.peek_ms / 4));
-            }
-        } else {
-            note_once("an EFB snapshot of a goop texture was not read back in time; refresh skipped");
-        }
-        inner.release_snapshot(job.snapshot);
-        job.active = false;
-        job.done = false;
-        job.failed = false;
-    }
-
-    // GPU thread, before a copy to a texture with a CPU copy runs: snapshots its source when no
-    // refresh is in flight and no other texture waited longer for one.
-    void maybe_refresh(const starlet::gx::TextureCopy& copy, std::uint32_t address) {
-        const auto it = shadows.find(address);
-        if (it == shadows.end()) return;
-        Shadow& s = it->second;
-        int channel = -1;
-        if (copy.luminance) channel = 4;
-        else if (copy.format == 1 || copy.format == 8) channel = 0;
-        else if (copy.format == 9) channel = 1;
-        else if (copy.format == 10) channel = 2;
-        else if (copy.format == 7) channel = 3;
-        const bool fits = !copy.depth && !copy.half_scale && !copy.filtered() && !copy.strip && channel >= 0 &&
-                          copy.width == s.width && copy.height <= s.height &&
-                          copy.stride == std::size_t(s.width / 8) * 32;
-        if (!fits) {
-            // Its texels are now this copy's, which the model does not decode: start again from memory.
-            note_once("a copy over a goop texture that is not a single-channel unscaled copy");
-            shadows.erase(it);
-            return;
-        }
-        // Reading a snapshot back costs the worker about 13 ms per 256x256 texture on the Flip
-        // (single pixels from the mapped readback): refreshes start at most every 6 frames, and
-        // after a refresh that read for N ms, N / 4 frames later at the earliest (about 12% of a
-        // core at 30 frames per second).
-        if (frame < next_refresh_frame) return;
-        {
-            std::lock_guard<std::mutex> lock(job_mutex);
-            if (job.active) return;
-        }
-        for (const auto& [a, other] : shadows)
-            if (a != address && other.used_frame + 4 >= frame && other.refreshed_frame < s.refreshed_frame) return;
-        const starlet::gx::EfbRegion region{copy.x, copy.y, copy.width, copy.height};
-        const int snapshot = inner.snapshot_efb_exact(region);
-        if (snapshot < 0) return;
-        next_refresh_frame = frame + 6;
-        std::lock_guard<std::mutex> lock(job_mutex);
-        job.active = true;
-        job.done = false;
-        job.failed = false;
-        job.address = address;
-        job.epoch = s.epoch;
-        job.snapshot = snapshot;
-        job.region = region;
-        job.channel = channel;
-        job_cv.notify_one();
-    }
-
-    void run_worker() {
-        starlet::os::name_thread("sms-goop");
-        for (;;) {
-            Job work;
-            {
-                std::unique_lock<std::mutex> lock(job_mutex);
-                job_cv.wait(lock, [this] { return stopping || (job.active && !job.done); });
-                if (stopping) return;
-                work.snapshot = job.snapshot;
-                work.region = job.region;
-                work.channel = job.channel;
-            }
-            const auto start = Clock::now();
-            bool ready = false;
-            while (!(ready = inner.snapshot_ready(work.snapshot)) && Clock::now() - start < std::chrono::seconds(3)) {
-                {
-                    std::lock_guard<std::mutex> lock(job_mutex);
-                    if (stopping) return;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-            const auto peek_start = Clock::now();
-            const int w = work.region.width, h = work.region.height;
-            std::vector<std::uint8_t> rows(std::size_t(w) * std::size_t(h));
-            bool failed = !ready;
-            for (int y = 0; y < h && !failed; ++y) {
-                for (int x = 0; x < w; ++x) {
-                    std::uint32_t argb = 0;
-                    if (!inner.peek_color_snapshot(work.snapshot, work.region.x + x, work.region.y + y, argb)) {
-                        failed = true;
-                        break;
-                    }
-                    const unsigned r = (argb >> 16) & 0xff, g = (argb >> 8) & 0xff, b = argb & 0xff;
-                    unsigned v;
-                    switch (work.channel) {
-                    case 0: v = r; break;
-                    case 1: v = g; break;
-                    case 2: v = b; break;
-                    case 3: v = argb >> 24; break;
-                    default: v = (257 * r + 504 * g + 98 * b + 16000) / 1000; break;
-                    }
-                    rows[std::size_t(y) * std::size_t(w) + std::size_t(x)] = std::uint8_t(v);
-                }
-            }
-            const double peek_ms = std::chrono::duration<double, std::milli>(Clock::now() - peek_start).count();
-            std::lock_guard<std::mutex> lock(job_mutex);
-            job.rows = std::move(rows);
-            job.failed = failed;
-            job.peek_ms = peek_ms;
-            job.done = true;
-            job_finished.store(true, std::memory_order_release);
-        }
-    }
-
     void frame_end() {
         ++frame;
         if (frame % 600 == 0) {
-            for (auto it = shadows.begin(); it != shadows.end();)
-                it = it->second.used_frame + 600 < frame ? shadows.erase(it) : std::next(it);
+            for (auto it = shadows.begin(); it != shadows.end();) {
+                const auto next = std::next(it);
+                if (it->second.used_frame + 600 < frame) forget(it);
+                it = next;
+            }
         }
         if (log_enabled() && Clock::now() - stats_at > std::chrono::seconds(10)) {
             stats_at = Clock::now();
-            std::printf("pixel metric: %llu intervals, %llu draws (%llu cached), %.2f ms counting per frame, %zu textures, "
-                        "%llu refreshes, %.2f ms reading each\n",
-                        (unsigned long long)intervals, (unsigned long long)draws, (unsigned long long)cache_hits,
+            std::printf("pixel metric: %llu intervals, %llu read, %llu draws (%llu cached), %.2f ms counting per frame, "
+                        "%zu textures, %llu refreshes\n",
+                        (unsigned long long)intervals, (unsigned long long)shared().reads.load(std::memory_order_relaxed),
+                        (unsigned long long)draws, (unsigned long long)cache_hits,
                         frame > stats_frame ? count_ms / double(frame - stats_frame) : 0.0, shadows.size(),
-                        (unsigned long long)refreshes, refreshes ? peek_ms_total / double(refreshes) : 0.0);
+                        (unsigned long long)refreshes);
             count_ms = 0;
             stats_frame = frame;
             std::fflush(stdout);
@@ -423,7 +286,6 @@ PixelMetricRenderer::~PixelMetricRenderer() = default;
 void PixelMetricRenderer::draw(const starlet::gx::State& state, const starlet::gx::Draw& draw,
                                starlet::gx::MemoryReader& memory) {
     Impl& g = *impl_;
-    g.service();
     g.state = &state;
     const std::uint32_t seq = state.bp(0x57) & 0xffffff;
     if (seq != 0 && seq != g.seq) {
@@ -452,7 +314,6 @@ void PixelMetricRenderer::wait_until_idle() {
     Impl& g = *impl_;
     if (g.open && g.state && g.state->bp(0x48) != g.open_token_word)
         g.close_interval(std::uint16_t(g.state->bp(0x48) & 0xffff));
-    g.service();
     inner_.wait_until_idle();
 }
 
@@ -463,16 +324,7 @@ void PixelMetricRenderer::copy_display(const starlet::gx::DisplayCopy& copy, std
 
 void PixelMetricRenderer::copy_texture(const starlet::gx::TextureCopy& copy, std::uint8_t* destination, std::size_t bytes,
                                        std::uint32_t address) {
-    Impl& g = *impl_;
-    g.service();
-    g.maybe_refresh(copy, address);
     inner_.copy_texture(copy, destination, bytes, address);
-    // Starlet may stamp the destination; keep its bytes as they are now to notice later CPU writes.
-    const auto it = g.shadows.find(address);
-    if (it != g.shadows.end()) {
-        const std::size_t size = it->second.memory.size();
-        if (const std::uint8_t* now = Impl::native(address, size)) it->second.memory.assign(now, now + size);
-    }
 }
 
 std::uint32_t PixelMetricRenderer::peek_depth(int x, int y) { return inner_.peek_depth(x, y); }
@@ -480,6 +332,9 @@ std::uint32_t PixelMetricRenderer::peek_color(int x, int y) { return inner_.peek
 bool PixelMetricRenderer::resident_in(const void* data, std::size_t bytes) const { return inner_.resident_in(data, bytes); }
 void PixelMetricRenderer::before_dma_read(const void* data, std::size_t bytes) { inner_.before_dma_read(data, bytes); }
 void PixelMetricRenderer::before_dma_write(const void* data, std::size_t bytes) { inner_.before_dma_write(data, bytes); }
+void PixelMetricRenderer::write_back(std::uint32_t address, std::size_t bytes, bool on) { inner_.write_back(address, bytes, on); }
+std::uint64_t PixelMetricRenderer::write_backs_issued() const { return inner_.write_backs_issued(); }
+bool PixelMetricRenderer::land_write_backs(std::uint64_t through, bool wait) { return inner_.land_write_backs(through, wait); }
 int PixelMetricRenderer::snapshot_efb(const starlet::gx::EfbRegion& region) { return inner_.snapshot_efb(region); }
 int PixelMetricRenderer::snapshot_efb_exact(const starlet::gx::EfbRegion& region) { return inner_.snapshot_efb_exact(region); }
 bool PixelMetricRenderer::snapshot_ready(int index) const { return inner_.snapshot_ready(index); }
@@ -501,7 +356,6 @@ void PixelMetricRenderer::wait_depth_readback(int handle) { inner_.wait_depth_re
 void PixelMetricRenderer::release_depth_readback(int handle) { inner_.release_depth_readback(handle); }
 void PixelMetricRenderer::set_frame_ahead(bool ahead) { inner_.set_frame_ahead(ahead); }
 bool PixelMetricRenderer::present(const starlet::gx::FramebufferView& frame, int drawable_width, int drawable_height, bool black) {
-    impl_->service();
     return inner_.present(frame, drawable_width, drawable_height, black);
 }
 std::vector<std::uint8_t> PixelMetricRenderer::readback() { return inner_.readback(); }
@@ -555,7 +409,10 @@ extern "C" unsigned sunshine_pixel_metric_read(void) {
         return 0;
     }
     sms::graphics::IntervalResult result;
-    if (sh.delivered) result = sh.current;  // otherwise the interval drew nothing
+    if (sh.delivered) {
+        result = sh.current;  // otherwise the interval drew nothing
+        sh.reads.fetch_add(1, std::memory_order_relaxed);
+    }
     if (result.unsupported) {
         sms::graphics::note_once(result.unsupported);
         return 0xffffffffu;
