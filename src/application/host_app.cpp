@@ -834,7 +834,11 @@ int run_checked(int argc, char** argv, int (*guest_main)()) {
     std::printf("Display: %dx%d\n", width, height);
 
     starlet::gx::GlesLimits limits;
-    limits.efb.height = 448;
+    // All 528 rows of the hardware EFB: the frame is 640x448, but the goop maps of Airstrip and
+    // Sirena are 512x512 and are drawn and copied back through the EFB's top 512 rows.
+    limits.efb.height = 528;
+    // Development: SMS_EFB_HEIGHT=448 keeps the earlier EFB (the frame's rows only), for comparisons.
+    if (const char* rows = std::getenv("SMS_EFB_HEIGHT")) limits.efb.height = std::atoi(rows);
     limits.aspect_width = 4;
     limits.aspect_height = 3;
     limits.direct.shading = starlet::gx::DirectShading::fast;
