@@ -179,15 +179,18 @@ public:
         ++swaps_;
         for (unsigned i = 0; i < count_; ++i)
             if (frames_[i] == swaps_) write(swaps_);
+        if (const unsigned long shot = shot_.exchange(0)) write(shot, "sunshine-shot-");
     }
+    // Any thread: the next presented image is written as sunshine-shot-ID.ppm.
+    void shoot(unsigned long id) { shot_.store(id); }
 
 private:
-    void write(unsigned long frame) {
+    void write(unsigned long frame, const char* prefix = "sunshine-frame-") {
         const int w = drawable_width, h = drawable_height;
         std::string pixels(std::size_t(w) * h * 4, '\0');
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, &pixels[0]);
-        const std::string path = directory_ + "/sunshine-frame-" + std::to_string(frame) + ".ppm";
+        const std::string path = directory_ + "/" + prefix + std::to_string(frame) + ".ppm";
         if (FILE* f = std::fopen(path.c_str(), "wb")) {
             std::fprintf(f, "P6\n%d %d\n255\n", w, h);
             for (int y = h - 1; y >= 0; --y)
@@ -197,10 +200,16 @@ private:
         }
     }
     std::string directory_;
+    std::atomic<unsigned long> shot_{0};
     unsigned long frames_[16] = {};
     unsigned count_ = 0;
     unsigned long swaps_ = 0;
 };
+
+Captures& shared_captures() {
+    static Captures captures;
+    return captures;
+}
 
 // GameCube controller from the handheld's pad. Face buttons follow the printed
 // Nintendo layout (A right, B below, X above, Y left); SDL names them by the
@@ -214,11 +223,13 @@ public:
     // Development: SMS_PRESS="seconds:INPUT[:milliseconds],..." holds each input at
     // that time since start, for 150 ms unless given. Inputs: A B X Y Z L R START
     // UP DOWN LEFT RIGHT (D-pad), STICK_UP/DOWN/LEFT/RIGHT and C_UP/DOWN/LEFT/RIGHT
-    // (full deflection); L and R also press their analog triggers fully. "seconds:INPUT[:milliseconds]@STATE[:STAGE[:PROGRESS]]" presses only while the
+    // (full deflection); L and R also press their analog triggers fully. SHOT writes the next
+    // presented image as SMS_CAPTURE_DIR/sunshine-shot-<stage><milliseconds>.ppm. "seconds:INPUT[:milliseconds]@STATE[:STAGE[:PROGRESS]]" presses only while the
     // game is in that TApplication state, stage and title/file-select TCardLoad progress. SMS_PRESS_UNTIL="STATE[:STAGE]>..." ends the script once the game has
     // passed through those TApplication states (9 file select, 5 gameplay) and stages in order,
     // and a final "+SECONDS" later, keeping only the presses gated on a stage; state changes are
-    // logged as "game state:" lines.
+    // logged as "game state:" lines. A time written "+seconds" counts from the latest entry into the
+    // press's gated state and stage (or another scenario of it) instead of from start.
     Controller() {
         for (const char* p = std::getenv("SMS_PRESS_UNTIL"); p && *p;) {
             char* end = nullptr;
@@ -233,8 +244,9 @@ public:
         const char* script = std::getenv("SMS_PRESS");
         for (const char* p = script; p && *p;) {
             char* end = nullptr;
-            const double seconds = std::strtod(p, &end);
-            if (end == p || *end != ':') break;
+            const bool relative = *p == '+';
+            const double seconds = std::strtod(p + relative, &end);
+            if (end == p + relative || *end != ':') break;
             p = end + 1;
             const char* name_end = p;
             while (*name_end && *name_end != ',' && *name_end != ':' && *name_end != '@') ++name_end;
@@ -259,14 +271,27 @@ public:
             for (const auto& n : names)
                 if (name == n.name)
                     script_.push_back({Uint32(seconds * 1000), hold, n.bits, n.sx, n.sy, n.cx, n.cy, only_state, only_stage,
-                                       only_progress});
+                                       only_progress, relative && only_state >= 0});
+            if (name == "SHOT")
+                script_.push_back({Uint32(seconds * 1000), 0, 0, 0, 0, 0, 0, only_state, only_stage, only_progress,
+                                   relative && only_state >= 0, true, 0});
             while (*name_end && *name_end != ',') ++name_end;
             p = *name_end ? name_end + 1 : name_end;
         }
         // SMS_WARP=CODE changes stage when the press script ends, through TMarDirector::setNextStage
         // on the game thread (CODE: (stage + 1) << 8 | scenario).
+        // SMS_WARP=CODE,CODE,... warps to each next code SMS_WARP_EVERY seconds (default 60) after
+        // arriving at the previous one, or 150 s after asking for it.
         if (const char* warp = std::getenv("SMS_WARP")) {
-            warp_ = int(std::strtol(warp, nullptr, 0));
+            for (const char* p = warp; *p;) {
+                char* end = nullptr;
+                const int code = int(std::strtol(p, &end, 0));
+                if (end == p) break;
+                warps_.push_back(code);
+                p = *end == ',' ? end + 1 : end;
+            }
+            warp_ = warps_.empty() ? 0 : warps_.front();
+            if (const char* every = std::getenv("SMS_WARP_EVERY")) warp_every_ms_ = Uint32(std::atof(every) * 1000);
             starlet::pad::set_read_hook(sunshine_pad_read_hook);
         }
         if (std::getenv("SMS_PAD_TRACE"))
@@ -302,6 +327,14 @@ public:
             const unsigned game = sunshine_game_state();
             if (game != game_state_) {
                 game_state_ = game;
+                // Entering a state and stage, or another scenario of it, restarts its relative presses.
+                if ((game & 0xffffff) != (last_area_ & 0xffffff)) {
+                    const int key = int((game >> 8) & 0xffff);
+                    const auto known = std::find_if(entered_.begin(), entered_.end(), [&](const auto& e) { return e.first == key; });
+                    if (known == entered_.end()) entered_.push_back({key, now});
+                    else known->second = now;
+                }
+                last_area_ = game;
                 std::printf("game state: %u ms app %u stage 0x%02x scenario %u card progress %d\n", now,
                             (game >> 16) & 0xff, (game >> 8) & 0xff, game & 0xff, int(game >> 24) - 1);
                 std::fflush(stdout);
@@ -318,11 +351,45 @@ public:
                 if (warp_) {
                     std::printf("controller: warp to 0x%x\n", unsigned(warp_));
                     sunshine_request_warp(warp_);
+                    warp_asked_ = now;
+                }
+            }
+            if (ended_ && warp_index_ + 1 < warps_.size()) {
+                const int code = warps_[warp_index_];
+                const int stage = code >= 0x100 ? (code >> 8) - 1 : code;
+                // Arrival: gameplay in the code's stage, and its scenario when the code names one.
+                if (!warp_arrived_ && int((game_state_ >> 16) & 0xff) == 5 && int((game_state_ >> 8) & 0xff) == stage &&
+                    (code < 0x100 || int(game_state_ & 0xff) == (code & 0xff)))
+                    warp_arrived_ = now;
+                if ((warp_arrived_ && now - warp_arrived_ >= warp_every_ms_) || now - warp_asked_ >= 150000) {
+                    warp_ = warps_[++warp_index_];
+                    warp_arrived_ = 0;
+                    warp_asked_ = now;
+                    std::printf("controller: warp to 0x%x\n", unsigned(warp_));
+                    std::fflush(stdout);
+                    sunshine_request_warp(warp_);
                 }
             }
         }
-        for (const Press& press : script_)
-            if (now >= press.at && now < press.at + press.hold &&
+        for (Press& press : script_) {
+            Uint32 at = press.at;
+            if (press.relative) {
+                // Counted from the latest entry into the press's state and stage; until then it waits.
+                const auto entered = std::find_if(entered_.begin(), entered_.end(), [&](const auto& e) {
+                    return (e.first >> 8) == press.state && (press.stage < 0 || (e.first & 0xff) == press.stage);
+                });
+                if (entered == entered_.end()) continue;
+                at += entered->second;
+            }
+            if (press.shot) {
+                if (now >= at && press.fired != at && (press.state < 0 || int((game_state_ >> 16) & 0xff) == press.state) &&
+                    (press.stage < 0 || int((game_state_ >> 8) & 0xff) == press.stage)) {
+                    press.fired = at;
+                    shared_captures().shoot((((game_state_ >> 8) & 0xff) * 100 + (game_state_ & 0xff)) * 1000000ul + press.at);
+                }
+                continue;
+            }
+            if (now >= at && now < at + press.hold &&
                 (press.state < 0 || int((game_state_ >> 16) & 0xff) == press.state) &&
                 (press.stage < 0 || int((game_state_ >> 8) & 0xff) == press.stage) &&
                 (press.progress < 0 || int(game_state_ >> 24) - 1 == press.progress)) {
@@ -339,6 +406,7 @@ public:
                     state.substick_y = press.c_y;
                 }
             }
+        }
         starlet::pad::publish(0, state);
         for (unsigned channel = 1; channel < 4; ++channel) starlet::pad::publish(channel, {});
     }
@@ -453,13 +521,22 @@ private:
     size_t matched_ = 0;
     Uint32 tail_ms_ = 0, end_at_ = 0;
     int warp_ = 0;
+    std::vector<int> warps_;
+    size_t warp_index_ = 0;
+    Uint32 warp_every_ms_ = 60000, warp_asked_ = 0, warp_arrived_ = 0;
     struct Press {
         Uint32 at, hold;
         std::uint16_t buttons;
         std::int8_t stick_x, stick_y, c_x, c_y;
         int state, stage, progress;
+        bool relative;
+        bool shot = false;
+        Uint32 fired = 0;  // shots: the time it fired at, once per entry into its stage
     };
     std::vector<Press> script_;
+    // (state << 8 | stage, ms since start) of each state and stage when first seen.
+    std::vector<std::pair<int, Uint32>> entered_;
+    unsigned last_area_ = ~0u;
     bool ended_ = false;
     Uint32 start_ = 0;
 };
@@ -774,10 +851,10 @@ int run_checked(int argc, char** argv, int (*guest_main)()) {
     limits.direct.program_lists = {shadercache + "/programs.list", shipped_program_list()};
     starlet::gx::GlesRenderer renderer(limits);
     prepare_programs(renderer, display.window);
-    static Captures captures;
+    shared_captures();
     renderer.set_swap([&display] {
         overlay::frame(drawable_width, drawable_height);
-        captures.before_swap();
+        shared_captures().before_swap();
         SDL_GL_SwapWindow(display.window);
         ++presented_frames;
         starlet::gx_fifo::frame_event('W');
