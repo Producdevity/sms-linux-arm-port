@@ -1,6 +1,9 @@
 #include "graphics/pixel_metric_renderer.hpp"
 
 #include "graphics/pixel_metric.hpp"
+#include "starlet/gx/pixel.hpp"
+#include "starlet/gx/tev.hpp"
+#include "starlet/gx/texture_copy.hpp"
 #include "starlet/gx/vertex.hpp"
 #include "starlet/os/game_memory.hpp"
 #include "starlet/sdk/gx.h"
@@ -59,6 +62,15 @@ bool log_enabled() {
     static const bool on = std::getenv("SMS_GOOP_LOG") != nullptr;
     return on;
 }
+// Development: every goop copy the CPU computes is rendered and read back by the GPU as well and
+// compared, waiting for the readback.
+bool verify_enabled() {
+    static const bool on = std::getenv("SMS_GOOP_VERIFY") != nullptr;
+    return on;
+}
+// One CPU-computed goop copy in this many per texture is checked against the GPU's.
+constexpr unsigned copies_per_check = 150;
+std::uint64_t mix(std::uint64_t h, std::uint64_t v) { return (h ^ v) * 0x100000001b3ull; }
 
 void note_once(const char* what) {
     static std::mutex mutex;
@@ -82,6 +94,12 @@ struct Shadow {
     MetricTexture metric;
     std::uint64_t generation = 0;       // advances whenever texels change
     std::uint64_t used_frame = 0, checked_frame = ~0ull, refreshed_frame = 0;
+    // Copies into it (PixelMetricRenderer::Impl::copy): the last one Starlet reads back, and the
+    // CPU result a readback is to confirm; a CPU result that differed ends CPU copies here.
+    std::uint64_t last_write_back = 0;
+    bool checking = false, cpu_off = false;
+    unsigned since_check = 0;
+    std::vector<std::uint8_t> next, prediction, input;
 };
 
 struct PixelMetricRenderer::Impl final : MetricTextures {
@@ -102,6 +120,25 @@ struct PixelMetricRenderer::Impl final : MetricTextures {
     // The counted draws repeat every frame: their vertices are decoded once.
     starlet::gx::VertexCache vertex_cache{starlet::gx::VertexCacheLimits{4u << 20, 256}};
     std::uint64_t intervals = 0, draws = 0, cache_hits = 0, refreshes = 0, stats_frame = 0;
+    // The draws since the last copy, while a copy of them is a function of one texture's texels:
+    // Super Mario Sunshine's goop pass (PollutionCount.cpp countTexDegree) without stamps is
+    // drawBlack (one colour) and then the counted drawTex of the layer's map at 1:1 through the
+    // layer's TEV, and its copy back into the map is a 256-entry table over the map's bytes. The
+    // CPU makes that copy's bytes; Starlet keeps rendering it and reads nothing back. Stamps
+    // (cleaning, regrowth, models) and anything else make the pass "other": Starlet reads it back.
+    enum class Pass { fresh, black, base, other };
+    Pass pass = Pass::fresh;
+    starlet::gx::PixelColor black{};
+    std::uint32_t pass_texture = 0;
+    int pass_width = 0, pass_height = 0;
+    std::uint64_t pass_key = 0;
+    std::shared_ptr<const starlet::gx::TevMaterial> pass_material;
+    std::shared_ptr<const starlet::gx::PixelSnapshot> pass_pixel;
+    std::unordered_map<std::uint64_t, std::array<std::uint8_t, 256>> copy_tables;
+    std::uint64_t cpu_copies = 0, gpu_copies = 0, checks = 0, differed = 0, unchecked = 0;
+    // Why goop copies went to the GPU: the pass had other draws (stamps), an earlier copy was
+    // still being read back, the copy did not match the pass, or it was a check.
+    std::uint64_t gpu_stamped = 0, gpu_pending = 0, gpu_unmatched = 0, gpu_checks = 0;
     double count_ms = 0;
     Clock::time_point stats_at = Clock::now();
 
@@ -254,7 +291,183 @@ struct PixelMetricRenderer::Impl final : MetricTextures {
         cached_quads.emplace(key, result.quads);
     }
 
+    // Writes the source colour as it is (blend off or ONE/ZERO) into an RGB8 EFB without fog or Z texture.
+    static bool writes_source(const starlet::gx::State& state, const starlet::gx::PixelSnapshot& pixel) {
+        const auto& plan = pixel.plan();
+        if (plan.format != starlet::gx::PixelFormat::rgb8 || !plan.color_write) return false;
+        if (plan.operation == starlet::gx::PixelOperation::blend) {
+            if (plan.source_factor != 1 || plan.destination_factor != 0) return false;
+        } else if (plan.operation != starlet::gx::PixelOperation::copy) return false;
+        return (state.bp(0x40) & 1) == 0 && ((state.bp(0xf1) >> 21) & 7) == 0 && (state.bp(0xf5) & 3) == 0;
+    }
+    static starlet::gx::TevColor colour_of(std::uint32_t c) {
+        return {std::uint8_t(c >> 24), std::uint8_t(c >> 16), std::uint8_t(c >> 8), std::uint8_t(c)};
+    }
+    // drawBlack: no texture, one material colour, unlit.
+    bool black_draw(const starlet::gx::State& state, const starlet::gx::Draw& draw) {
+        const std::uint32_t gen = state.bp(0x00);
+        if (draw.merged() || (gen & 0xf) != 0 || ((gen >> 16) & 7) != 0 || ((gen >> 4) & 7) == 0) return false;
+        if ((state.xf(0x100e) & 3) != 0 || (state.xf(0x1010) & 3) != 0) return false;
+        const auto tev = starlet::gx::capture_tev(state);
+        const auto pixel = starlet::gx::capture_pixel(state, starlet::gx::PixelPolicy::candidate_v1);
+        if (!tev || !pixel || !writes_source(state, *pixel.snapshot)) return false;
+        starlet::gx::TevInputs in;
+        in.raster[0] = colour_of(state.xf(0x100c));
+        in.raster_valid = 1;
+        const auto e = starlet::gx::evaluate_tev(tev.material->pipeline, tev.material->uniforms, in,
+                                                 starlet::gx::TevArithmeticModel::fixed8_candidate_v1);
+        if (!e || !e.alpha_pass) return false;
+        const auto out = starlet::gx::evaluate_pixel(*pixel.snapshot, e.color, {0, 0, 0, 255}, 0, 0, true);
+        if (!out) return false;
+        black = out.codes;
+        return true;
+    }
+    // drawTex: one nearest I8 texture, the counted interval.
+    bool base_draw(const starlet::gx::State& state, const starlet::gx::Draw& draw) {
+        const std::uint32_t gen = state.bp(0x00);
+        if (!open || draw.merged() || (gen & 0xf) != 1 || ((gen >> 16) & 7) != 0) return false;
+        const unsigned stages = ((gen >> 10) & 0xf) + 1;
+        for (unsigned i = 0; i < stages; ++i) {
+            const std::uint32_t order = state.bp(std::uint8_t(0x28 + i / 2)) >> (i & 1 ? 12 : 0);
+            if ((order & 0x40) && (order & 0x3f) != 0) return false;  // texmap 0 through texcoord 0
+        }
+        const std::uint32_t image = state.bp(0x88), mode = state.bp(0x80);
+        if (((image >> 20) & 0xf) != 1 || (mode & 0xf0) != 0) return false;
+        const auto tev = starlet::gx::capture_tev(state);
+        const auto pixel = starlet::gx::capture_pixel(state, starlet::gx::PixelPolicy::candidate_v1);
+        if (!tev || !pixel || !writes_source(state, *pixel.snapshot)) return false;
+        pass_texture = (state.bp(0x94) & 0xffffff) << 5;
+        pass_width = int(image & 0x3ff) + 1;
+        pass_height = int((image >> 10) & 0x3ff) + 1;
+        pass_material = tev.material;
+        pass_pixel = pixel.snapshot;
+        std::uint64_t key = 0xcbf29ce484222325ull;
+        for (unsigned a : {0x00u, 0x28u, 0x29u, 0x2au, 0x2bu, 0x2cu, 0x2du, 0x2eu, 0x2fu, 0x40u, 0x41u, 0x42u, 0x43u})
+            key = mix(key, state.bp(std::uint8_t(a)));
+        for (unsigned a = 0xc0; a < 0xe0; ++a) key = mix(key, state.bp(std::uint8_t(a)));
+        for (unsigned a = 0xf3; a < 0xfe; ++a) key = mix(key, state.bp(std::uint8_t(a)));
+        for (int bank = 0; bank < 2; ++bank)
+            for (std::uint8_t half = 0; half < 8; ++half) key = mix(key, state.tev_register(bank != 0, half));
+        pass_key = mix(key, std::uint64_t(black[0]) | std::uint64_t(black[1]) << 8 | std::uint64_t(black[2]) << 16 |
+                                std::uint64_t(black[3]) << 24);
+        return true;
+    }
+    void classify(const starlet::gx::State& state, const starlet::gx::Draw& draw) {
+        if (pass == Pass::fresh) pass = black_draw(state, draw) ? Pass::black : Pass::other;
+        else if (pass == Pass::black) pass = base_draw(state, draw) ? Pass::base : Pass::other;
+        else pass = Pass::other;
+    }
+    // The copy's byte for each texel byte of the base draw's texture, through its TEV, alpha test
+    // and blend over drawBlack's colour, then the copy's encoding; null where the model refuses.
+    const std::array<std::uint8_t, 256>* copy_table(const starlet::gx::TextureCopy& copy) {
+        const std::uint64_t key = mix(mix(pass_key, copy.format), std::uint64_t(copy.luminance) << 1 | std::uint64_t(copy.rgba6));
+        const auto found = copy_tables.find(key);
+        if (found != copy_tables.end()) return &found->second;
+        starlet::gx::TextureCopy tile = copy;
+        tile.x = 0;
+        tile.y = 0;
+        tile.width = 8;
+        tile.height = 4;
+        tile.stride = 32;
+        tile.clear.reset();
+        std::array<std::uint8_t, 32 * 4> rgba{};
+        alignas(32) std::array<std::uint8_t, 32> encoded{};
+        std::array<std::uint8_t, 256> table{};
+        for (unsigned chunk = 0; chunk < 8; ++chunk) {
+            for (unsigned i = 0; i < 32; ++i) {
+                const auto v = std::uint8_t(chunk * 32 + i);
+                starlet::gx::TevInputs in;
+                in.texture.fill({v, v, v, v});
+                in.texture_valid = 0xffff;
+                const auto e = starlet::gx::evaluate_tev(pass_material->pipeline, pass_material->uniforms, in,
+                                                         starlet::gx::TevArithmeticModel::fixed8_candidate_v1);
+                if (!e) return nullptr;
+                const auto out = starlet::gx::evaluate_pixel(*pass_pixel, e.color, black, 0, 0, e.alpha_pass);
+                if (!out) return nullptr;
+                // Bottom-to-top rows; pixel i of the tile is row i / 8, column i % 8.
+                std::memcpy(&rgba[std::size_t((3 - i / 8) * 8 + i % 8) * 4], out.codes.data(), 4);
+            }
+            starlet::gx::encode_texture_copy(tile, {rgba.data(), rgba.size()}, encoded.data(), encoded.size());
+            std::memcpy(&table[chunk * 32], encoded.data(), 32);
+        }
+        if (copy_tables.size() >= 64) copy_tables.clear();
+        return &copy_tables.emplace(key, table).first->second;
+    }
+    void copy(const starlet::gx::TextureCopy& copy, std::uint8_t* destination, std::size_t bytes, std::uint32_t address) {
+        const Pass step = pass;
+        pass = Pass::fresh;
+        const auto it = shadows.find(address);
+        if (it == shadows.end()) {
+            inner.copy_texture(copy, destination, bytes, address);
+            return;
+        }
+        Shadow& s = it->second;
+        const bool landed = s.last_write_back == 0 || inner.land_write_backs(s.last_write_back, verify_enabled());
+        if (landed) s.last_write_back = 0;
+        if (s.checking) {
+            s.checking = false;
+            if (!landed || s.prediction.size() != bytes) ++unchecked;
+            else check(s, destination, bytes);
+        }
+        const bool single_byte = copy.format == 1 || copy.format == 7 || (copy.format >= 8 && copy.format <= 10);
+        const bool matches = step == Pass::base && pass_texture == address && copy.x == 0 && copy.y == 0 &&
+                             copy.width == pass_width && copy.height == pass_height && !copy.half_scale &&
+                             !copy.filtered() && !copy.depth && !copy.strip && single_byte &&
+                             s.width == pass_width && s.height == pass_height &&
+                             bytes == std::size_t(s.width) * std::size_t(s.height) &&
+                             copy.stride == std::size_t(s.width / 8) * 32;
+        if (step != Pass::base) ++gpu_stamped;
+        else if (!matches) ++gpu_unmatched;
+        else if (!landed) ++gpu_pending;
+        if (matches && landed && !s.cpu_off) {
+            if (const auto* table = copy_table(copy)) {
+                s.next.resize(bytes);
+                for (std::size_t i = 0; i < bytes; ++i) s.next[i] = (*table)[destination[i]];
+                if (verify_enabled() || ++s.since_check >= copies_per_check) {
+                    // Starlet renders and reads this one back; the next copy compares.
+                    s.since_check = 0;
+                    ++gpu_checks;
+                    s.prediction.swap(s.next);
+                    if (verify_enabled()) s.input.assign(destination, destination + bytes);
+                    s.checking = true;
+                } else {
+                    // The counts read memory at their own pace (texture()), as for copies Starlet makes.
+                    inner.copy_texture_with_contents(copy, destination, bytes, address, s.next.data());
+                    ++cpu_copies;
+                    return;
+                }
+            }
+        }
+        const std::uint64_t before = inner.write_backs_issued();
+        inner.copy_texture(copy, destination, bytes, address);
+        if (inner.write_backs_issued() != before) s.last_write_back = inner.write_backs_issued();
+        ++gpu_copies;
+    }
+    void check(Shadow& s, const std::uint8_t* memory, std::size_t bytes) {
+        ++checks;
+        std::size_t differ = 0;
+        for (std::size_t i = 0; i < bytes; ++i) differ += memory[i] != s.prediction[i];
+        if (!differ) return;
+        ++differed;
+        if (verify_enabled()) {
+            int shown = 0;
+            for (std::size_t i = 0; i < bytes && shown < 4; ++i)
+                if (memory[i] != s.prediction[i]) {
+                    std::printf("pixel metric: goop copy 0x%08x byte %zu: texel %u, CPU %u, GPU %u (%zu bytes differ)\n",
+                                s.address, i, i < s.input.size() ? unsigned(s.input[i]) : 0u, unsigned(s.prediction[i]),
+                                unsigned(memory[i]), differ);
+                    ++shown;
+                }
+            std::fflush(stdout);
+            return;
+        }
+        s.cpu_off = true;
+        std::printf("pixel metric: CPU goop copy into 0x%08x differs from the GPU's in %zu of %zu bytes; the GPU's from now on\n",
+                    s.address, differ, bytes);
+        std::fflush(stdout);
+    }
     void frame_end() {
+        pass = Pass::fresh;
         ++frame;
         if (frame % 600 == 0) {
             for (auto it = shadows.begin(); it != shadows.end();) {
@@ -266,11 +479,13 @@ struct PixelMetricRenderer::Impl final : MetricTextures {
         if (log_enabled() && Clock::now() - stats_at > std::chrono::seconds(10)) {
             stats_at = Clock::now();
             std::printf("pixel metric: %llu intervals, %llu read, %llu draws (%llu cached), %.2f ms counting per frame, "
-                        "%zu textures, %llu refreshes\n",
+                        "%zu textures, %llu refreshes; goop copies %llu CPU, %llu GPU (%llu stamped, %llu pending, %llu unmatched, %llu checks), %llu checked (%llu differed, %llu not read back)\n",
                         (unsigned long long)intervals, (unsigned long long)shared().reads.load(std::memory_order_relaxed),
                         (unsigned long long)draws, (unsigned long long)cache_hits,
                         frame > stats_frame ? count_ms / double(frame - stats_frame) : 0.0, shadows.size(),
-                        (unsigned long long)refreshes);
+                        (unsigned long long)refreshes, (unsigned long long)cpu_copies, (unsigned long long)gpu_copies,
+                        (unsigned long long)gpu_stamped, (unsigned long long)gpu_pending, (unsigned long long)gpu_unmatched,
+                        (unsigned long long)gpu_checks, (unsigned long long)checks, (unsigned long long)differed, (unsigned long long)unchecked);
             count_ms = 0;
             stats_frame = frame;
             std::fflush(stdout);
@@ -305,6 +520,7 @@ void PixelMetricRenderer::draw(const starlet::gx::State& state, const starlet::g
         }
         g.count_ms += std::chrono::duration<double, std::milli>(Clock::now() - start).count();
     }
+    if (g.pass != Impl::Pass::other) g.classify(state, draw);
     inner_.draw(state, draw, memory);
 }
 
@@ -324,7 +540,7 @@ void PixelMetricRenderer::copy_display(const starlet::gx::DisplayCopy& copy, std
 
 void PixelMetricRenderer::copy_texture(const starlet::gx::TextureCopy& copy, std::uint8_t* destination, std::size_t bytes,
                                        std::uint32_t address) {
-    inner_.copy_texture(copy, destination, bytes, address);
+    impl_->copy(copy, destination, bytes, address);
 }
 
 std::uint32_t PixelMetricRenderer::peek_depth(int x, int y) { return inner_.peek_depth(x, y); }
