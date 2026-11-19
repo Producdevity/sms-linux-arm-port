@@ -90,3 +90,4 @@ sms-pc-port/zz-msl-01-printf-null-string.patch
 0001-gx-writes-go-through-starlet-s-fifo.patch
 0002-sdk-structures-take-starlet-s-layout.patch
 0003-gx-texture-objects-fit-32-bytes.patch
+0004-jdrama-video-reports-the-frame-rate-to-the-port.patch

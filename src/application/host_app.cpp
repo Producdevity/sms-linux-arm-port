@@ -130,6 +130,13 @@ void save() {
     std::lock_guard<std::mutex> guard(lock);
     if (spo_config_dirty()) spo_config_save();
 }
+// The game's frame rate, from the game thread. The overlay colours its counter against it.
+void target_fps(unsigned fps) {
+    static unsigned reported = 0;
+    if (!active || fps == reported) return;
+    std::lock_guard<std::mutex> guard(lock);
+    if (spo_target_fps_set(fps) == SPO_OK) reported = fps;
+}
 // A safe point: the menu is closed and drained. A failed save is not retried until the next change.
 void save_when_closed() {
     static bool failed = false;
@@ -153,6 +160,7 @@ void init() {}
 void handle(const SDL_Event&) {}
 bool captured() { return false; }
 void frame(int, int) {}
+void target_fps(unsigned) {}
 void save() {}
 void save_when_closed() {}
 void shutdown() {}
@@ -995,4 +1003,10 @@ int run_checked(int argc, char** argv, int (*guest_main)()) {
 
 const char* build_id() { return starlet::os::build_id(); }
 
+}
+
+// JDrama::TVideo::waitForRetrace's argument is the retraces a game frame lasts (TDisplay's, 2 in
+// Application.cpp), of the 59.94 Hz VI.
+void sunshine_report_frame_rate(std::uint16_t retraces) {
+    overlay::target_fps(60 / (retraces == 0 ? 1 : retraces));
 }

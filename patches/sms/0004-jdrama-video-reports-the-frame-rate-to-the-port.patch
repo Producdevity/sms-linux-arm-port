@@ -1,0 +1,19 @@
+Reason: the frame's retrace count (TDisplay's second constructor argument, 2 for the game's 30 fps)
+is the game's own frame rate. The port reports it to the performance overlay.
+
+diff --git a/libs/JSystem/src/JDrama/JDRVideo.cpp b/libs/JSystem/src/JDrama/JDRVideo.cpp
+--- a/libs/JSystem/src/JDrama/JDRVideo.cpp
++++ b/libs/JSystem/src/JDrama/JDRVideo.cpp
+@@ -33,8 +33,12 @@
+ 
+ void TVideo::setNextXFB(const void* fb) { mNextFrameBuffer = fb; }
+ 
++void sunshine_report_frame_rate(u16 retraces);
++
+ void TVideo::waitForRetrace(u16 param_1)
+ {
++	sunshine_report_frame_rate(param_1);
++
+ 	while (mNextRetraceIndex - (int)VIGetRetraceCount() > 1)
+ 		VIWaitForRetrace();
+ 
